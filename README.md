@@ -111,11 +111,19 @@ git clone git@github.com:jackwener/boss-cli.git .agents/skills/boss-cli
 
 ```text
 boss_cli/
-├── __init__.py        # Package version
-├── cli.py             # Click entry point & command registration
-├── client.py          # Boss Zhipin API client (search, recommend, profile, chat)
-├── auth.py            # Authentication (browser-cookie3, QR login, credential management)
-└── constants.py       # URLs, headers, city codes, filter enums
+├── __init__.py           # Package version
+├── cli.py                # Click entry point (lightweight, add_command only)
+├── client.py             # API client (rate-limit, retry, anti-detection)
+├── auth.py               # Authentication (browser-cookie3, QR login)
+├── constants.py          # URLs, headers, city codes, filter enums
+├── exceptions.py         # Structured exceptions (BossApiError hierarchy)
+└── commands/
+    ├── __init__.py
+    ├── _common.py        # handle_command, structured_output_options
+    ├── auth.py           # login, logout, status, me
+    ├── search.py         # search, recommend, cities
+    ├── personal.py       # applied, interviews
+    └── social.py         # chat, greet, batch-greet
 ```
 
 ## Development

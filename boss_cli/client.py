@@ -1,14 +1,16 @@
-"""API client for Boss Zhipin."""
+"""API client for Boss Zhipin with rate limiting, retry, and anti-detection."""
 
 from __future__ import annotations
 
+import json
 import logging
+import random
+import time
 from typing import Any
 
 import httpx
 
-from boss_cli.auth import Credential
-from boss_cli.constants import (
+from .constants import (
     BASE_URL,
     CITY_CODES,
     DELIVER_LIST_URL,
@@ -27,56 +29,165 @@ from boss_cli.constants import (
     RESUME_STATUS_URL,
     USER_INFO_URL,
 )
+from .exceptions import BossApiError, ParamError, RateLimitError, SessionExpiredError
 
 logger = logging.getLogger(__name__)
 
 
 class BossClient:
-    """Async HTTP client wrapper for Boss Zhipin APIs."""
+    """Boss Zhipin API client with Gaussian jitter, exponential backoff, and session-stable identity.
 
-    def __init__(self, credential: Credential | None = None):
+    Anti-detection strategy:
+    - Gaussian jitter delay between requests (~1s mean, σ=0.3)
+    - 5% chance of a random long pause (2-5s) to mimic reading behavior
+    - Exponential backoff on HTTP 429/5xx (up to 3 retries)
+    - Response cookies merged back into session jar
+    - Request counter for monitoring
+    """
+
+    def __init__(
+        self,
+        credential: object | None = None,
+        timeout: float = 30.0,
+        request_delay: float = 1.0,
+        max_retries: int = 3,
+    ):
         self.credential = credential
-        self._client: httpx.AsyncClient | None = None
+        self._timeout = timeout
+        self._request_delay = request_delay
+        self._base_request_delay = request_delay
+        self._max_retries = max_retries
+        self._last_request_time = 0.0
+        self._request_count = 0
+        self._http: httpx.Client | None = None
 
-    async def __aenter__(self) -> BossClient:
-        headers = dict(HEADERS)
+    def _build_client(self) -> httpx.Client:
         cookies = {}
         if self.credential:
             cookies = self.credential.cookies
-        self._client = httpx.AsyncClient(
+        return httpx.Client(
             base_url=BASE_URL,
-            headers=headers,
+            headers=dict(HEADERS),
             cookies=cookies,
             follow_redirects=True,
-            timeout=httpx.Timeout(30),
+            timeout=httpx.Timeout(self._timeout),
         )
-        return self
-
-    async def __aexit__(self, *args: Any) -> None:
-        if self._client:
-            await self._client.aclose()
 
     @property
-    def client(self) -> httpx.AsyncClient:
-        if not self._client:
-            raise RuntimeError("Client not initialized. Use 'async with BossClient() as client:'")
-        return self._client
+    def client(self) -> httpx.Client:
+        if not self._http:
+            raise RuntimeError("Client not initialized. Use 'with BossClient() as client:'")
+        return self._http
 
-    def _check_response(self, data: dict[str, Any], action: str) -> dict[str, Any]:
-        """Validate API response and return zpData."""
+    def __enter__(self) -> BossClient:
+        self._http = self._build_client()
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if self._http:
+            self._http.close()
+            self._http = None
+
+    # ── Rate limiting ───────────────────────────────────────────────
+
+    def _rate_limit_delay(self) -> None:
+        """Enforce minimum delay with Gaussian jitter to mimic human browsing."""
+        if self._request_delay <= 0:
+            return
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._request_delay:
+            # Gaussian jitter: mean=0.3, σ=0.15, clamped to [0, ∞)
+            jitter = max(0, random.gauss(0.3, 0.15))
+            # 5% chance of a long pause to mimic reading
+            if random.random() < 0.05:
+                jitter += random.uniform(2.0, 5.0)
+            sleep_time = self._request_delay - elapsed + jitter
+            logger.debug("Rate-limit delay: %.2fs", sleep_time)
+            time.sleep(sleep_time)
+
+    def _mark_request(self) -> None:
+        self._last_request_time = time.time()
+        self._request_count += 1
+
+    # ── Response handling ───────────────────────────────────────────
+
+    def _merge_response_cookies(self, resp: httpx.Response) -> None:
+        """Persist response Set-Cookie headers back into the session jar."""
+        for name, value in resp.cookies.items():
+            if value:
+                self.client.cookies.set(name, value)
+
+    def _handle_response(self, data: dict[str, Any], action: str) -> dict[str, Any]:
+        """Validate API response and return zpData, raise typed exceptions."""
         code = data.get("code", -1)
+
+        if code == 0:
+            return data.get("zpData", {})
+
+        message = data.get("message", "Unknown error")
+
         if code == 37:
-            raise RuntimeError(
-                f"{action}: 环境异常 (__zp_stoken__ 已过期)。"
-                "请清除 cookie 后重新登录: boss logout && boss login"
-            )
-        if code != 0:
-            raise RuntimeError(f"{action}: {data.get('message', 'Unknown error')} (code={code})")
-        return data.get("zpData", {})
+            raise SessionExpiredError()
+        if code in (17, 19):
+            raise ParamError(message, code=code)
+        if code == 9:
+            raise RateLimitError()
+
+        raise BossApiError(f"{action}: {message} (code={code})", code=code, response=data)
+
+    # ── Request with retry ──────────────────────────────────────────
+
+    def _request(self, method: str, url: str, **kwargs) -> dict[str, Any]:
+        """Execute HTTP request with rate-limit delay, retry, and cookie merge."""
+        self._rate_limit_delay()
+        last_exc: Exception | None = None
+
+        for attempt in range(self._max_retries):
+            try:
+                resp = self.client.request(method, url, **kwargs)
+                self._merge_response_cookies(resp)
+                self._mark_request()
+
+                # Retry on server errors
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        "HTTP %d from %s, retrying in %.1fs (attempt %d/%d)",
+                        resp.status_code, url[:80], wait, attempt + 1, self._max_retries,
+                    )
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+
+                # Check for HTML responses (redirect to login page)
+                text = resp.text
+                if text.startswith("<"):
+                    raise BossApiError(f"Received HTML instead of JSON from {url} (possible auth redirect)")
+
+                return resp.json()
+
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                last_exc = exc
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(
+                    "Network error: %s, retrying in %.1fs (attempt %d/%d)",
+                    exc, wait, attempt + 1, self._max_retries,
+                )
+                time.sleep(wait)
+
+        if last_exc:
+            raise BossApiError(f"Request failed after {self._max_retries} retries: {last_exc}") from last_exc
+        raise BossApiError(f"Request failed after {self._max_retries} retries")
+
+    def _get(self, url: str, params: dict[str, Any] | None = None, action: str = "") -> dict[str, Any]:
+        """GET request with response validation."""
+        data = self._request("GET", url, params=params)
+        return self._handle_response(data, action)
 
     # ── Job Search & Browse ─────────────────────────────────────────
 
-    async def search_jobs(
+    def search_jobs(
         self,
         query: str,
         city: str = "101010100",
@@ -85,9 +196,6 @@ class BossClient:
         experience: str | None = None,
         degree: str | None = None,
         salary: str | None = None,
-        industry: str | None = None,
-        scale: str | None = None,
-        stage: str | None = None,
     ) -> dict[str, Any]:
         """Search jobs."""
         params: dict[str, Any] = {
@@ -102,129 +210,69 @@ class BossClient:
             params["degree"] = degree
         if salary:
             params["salary"] = salary
-        if industry:
-            params["industry"] = industry
-        if scale:
-            params["scale"] = scale
-        if stage:
-            params["stage"] = stage
+        return self._get(JOB_SEARCH_URL, params=params, action="搜索职位")
 
-        resp = await self.client.get(JOB_SEARCH_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "搜索职位")
-
-    async def get_recommend_jobs(self, page: int = 1) -> dict[str, Any]:
+    def get_recommend_jobs(self, page: int = 1) -> dict[str, Any]:
         """Get personalized job recommendations."""
-        resp = await self.client.get(JOB_RECOMMEND_URL, params={"page": page})
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "推荐职位")
+        return self._get(JOB_RECOMMEND_URL, params={"page": page}, action="推荐职位")
 
-    async def get_job_card(self, security_id: str, lid: str) -> dict[str, Any]:
+    def get_job_card(self, security_id: str, lid: str) -> dict[str, Any]:
         """Get job card info (hover preview)."""
-        resp = await self.client.get(
-            JOB_CARD_URL,
-            params={"securityId": security_id, "lid": lid},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "职位卡片")
+        return self._get(JOB_CARD_URL, params={"securityId": security_id, "lid": lid}, action="职位卡片")
 
-    async def get_job_detail(self, security_id: str, lid: str = "") -> dict[str, Any]:
+    def get_job_detail(self, security_id: str, lid: str = "") -> dict[str, Any]:
         """Get detailed information for a specific job."""
         params: dict[str, str] = {"securityId": security_id}
         if lid:
             params["lid"] = lid
-        resp = await self.client.get(JOB_DETAIL_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "职位详情")
+        return self._get(JOB_DETAIL_URL, params=params, action="职位详情")
 
     # ── Personal Center ─────────────────────────────────────────────
 
-    async def get_user_info(self) -> dict[str, Any]:
+    def get_user_info(self) -> dict[str, Any]:
         """Get current user info (userId, name, avatar, etc.)."""
-        resp = await self.client.get(USER_INFO_URL)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "用户信息")
+        return self._get(USER_INFO_URL, action="用户信息")
 
-    async def get_resume_baseinfo(self) -> dict[str, Any]:
+    def get_resume_baseinfo(self) -> dict[str, Any]:
         """Get resume basic info (full profile: name, age, degree, etc.)."""
-        resp = await self.client.get(RESUME_BASEINFO_URL)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "简历基本信息")
+        return self._get(RESUME_BASEINFO_URL, action="简历基本信息")
 
-    async def get_resume_expect(self) -> dict[str, Any]:
+    def get_resume_expect(self) -> dict[str, Any]:
         """Get job expectations (desired position, salary, city)."""
-        resp = await self.client.get(RESUME_EXPECT_URL)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "求职期望")
+        return self._get(RESUME_EXPECT_URL, action="求职期望")
 
-    async def get_resume_status(self) -> dict[str, Any]:
+    def get_resume_status(self) -> dict[str, Any]:
         """Get resume status."""
-        resp = await self.client.get(RESUME_STATUS_URL)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "简历状态")
+        return self._get(RESUME_STATUS_URL, action="简历状态")
 
-    async def get_deliver_list(self, page: int = 1) -> dict[str, Any]:
+    def get_deliver_list(self, page: int = 1) -> dict[str, Any]:
         """Get list of jobs applied to (已投递)."""
-        resp = await self.client.get(DELIVER_LIST_URL, params={"page": page})
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "已投递列表")
+        return self._get(DELIVER_LIST_URL, params={"page": page}, action="已投递列表")
 
-    async def get_interview_data(self) -> dict[str, Any]:
+    def get_interview_data(self) -> dict[str, Any]:
         """Get interview data (面试)."""
-        resp = await self.client.get(INTERVIEW_DATA_URL)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "面试数据")
+        return self._get(INTERVIEW_DATA_URL, action="面试数据")
 
-    async def get_job_history(self, page: int = 1) -> dict[str, Any]:
+    def get_job_history(self, page: int = 1) -> dict[str, Any]:
         """Get job browsing history."""
-        resp = await self.client.get(JOB_HISTORY_URL, params={"page": page})
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "浏览历史")
+        return self._get(JOB_HISTORY_URL, params={"page": page}, action="浏览历史")
 
     # ── Social / Chat ───────────────────────────────────────────────
 
-    async def get_friend_list(self) -> dict[str, Any]:
+    def get_friend_list(self) -> dict[str, Any]:
         """Get geek friend list (沟通过的 Boss)."""
-        resp = await self.client.get(FRIEND_LIST_URL)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "好友列表")
+        return self._get(FRIEND_LIST_URL, action="好友列表")
 
-    async def add_friend(self, security_id: str, lid: str = "") -> dict[str, Any]:
-        """Send greeting to a Boss (打招呼 / 投递简历).
-
-        Args:
-            security_id: Job security ID from search results
-            lid: Lid parameter from search results
-        """
+    def add_friend(self, security_id: str, lid: str = "") -> dict[str, Any]:
+        """Send greeting to a Boss (打招呼 / 投递简历)."""
         params: dict[str, str] = {"securityId": security_id}
         if lid:
             params["lid"] = lid
-        resp = await self.client.get(FRIEND_ADD_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "打招呼")
+        return self._get(FRIEND_ADD_URL, params=params, action="打招呼")
 
-    async def get_geek_job(self, security_id: str) -> dict[str, Any]:
+    def get_geek_job(self, security_id: str) -> dict[str, Any]:
         """Get interacted job info."""
-        resp = await self.client.get(
-            GEEK_GET_JOB_URL,
-            params={"securityId": security_id},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return self._check_response(data, "互动职位")
+        return self._get(GEEK_GET_JOB_URL, params={"securityId": security_id}, action="互动职位")
 
 
 # ── City resolution ─────────────────────────────────────────────────

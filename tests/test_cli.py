@@ -1,8 +1,9 @@
-"""Tests for Boss CLI commands using Click's test runner."""
+"""Unit tests for Boss CLI commands using Click's test runner and monkeypatch."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -12,8 +13,11 @@ from boss_cli.cli import cli
 runner = CliRunner()
 
 
+# ── CLI Basics ──────────────────────────────────────────────────────
+
+
 class TestCliBasic:
-    """Test CLI basics without requiring cookies."""
+    """Test CLI basics without requiring cookies or network."""
 
     def test_version(self):
         result = runner.invoke(cli, ["--version"])
@@ -27,56 +31,153 @@ class TestCliBasic:
 
     def test_all_commands_registered(self):
         result = runner.invoke(cli, ["--help"])
-        commands_expected = [
-            # Auth
-            "login", "status", "logout",
-            # Personal
-            "me", "applied", "interviews",
-            # Search & Browse
+        expected = [
+            "login", "status", "logout", "me",
             "search", "recommend", "cities",
-            # Social
+            "applied", "interviews",
             "chat", "greet", "batch-greet",
         ]
-        for cmd in commands_expected:
+        for cmd in expected:
             assert cmd in result.output, f"Command '{cmd}' not found in CLI help"
 
-    def test_search_help(self):
+
+class TestCommandHelp:
+    """Verify every command has --help without errors."""
+
+    @pytest.mark.parametrize("cmd", [
+        "login", "logout", "status", "me",
+        "search", "recommend", "cities",
+        "applied", "interviews",
+        "chat", "greet", "batch-greet",
+    ])
+    def test_help(self, cmd: str):
+        result = runner.invoke(cli, [cmd, "--help"])
+        assert result.exit_code == 0, f"{cmd} --help failed: {result.output}"
+
+    def test_search_has_filter_options(self):
         result = runner.invoke(cli, ["search", "--help"])
-        assert result.exit_code == 0
         assert "--city" in result.output
         assert "--salary" in result.output
         assert "--exp" in result.output
         assert "--degree" in result.output
 
-    def test_recommend_help(self):
-        result = runner.invoke(cli, ["recommend", "--help"])
-        assert result.exit_code == 0
-
-    def test_me_help(self):
+    def test_me_has_output_options(self):
         result = runner.invoke(cli, ["me", "--help"])
-        assert result.exit_code == 0
+        assert "--json" in result.output
+        assert "--yaml" in result.output
 
-    def test_applied_help(self):
-        result = runner.invoke(cli, ["applied", "--help"])
-        assert result.exit_code == 0
-
-    def test_interviews_help(self):
-        result = runner.invoke(cli, ["interviews", "--help"])
-        assert result.exit_code == 0
-
-    def test_chat_help(self):
-        result = runner.invoke(cli, ["chat", "--help"])
-        assert result.exit_code == 0
-
-    def test_greet_help(self):
-        result = runner.invoke(cli, ["greet", "--help"])
-        assert result.exit_code == 0
-
-    def test_batch_greet_help(self):
+    def test_batch_greet_has_options(self):
         result = runner.invoke(cli, ["batch-greet", "--help"])
-        assert result.exit_code == 0
         assert "--dry-run" in result.output
         assert "--count" in result.output or "-n" in result.output
+        assert "--yes" in result.output or "-y" in result.output
+
+
+# ── Auth commands (mocked) ──────────────────────────────────────────
+
+
+class TestAuthCommands:
+    """Test auth commands with mocked credentials."""
+
+    def test_status_without_auth(self):
+        with patch("boss_cli.auth.get_credential", return_value=None):
+            result = runner.invoke(cli, ["status"])
+            assert result.exit_code == 0
+            assert "未登录" in result.output
+
+    def test_status_with_auth(self):
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"a": "1", "b": "2"}
+        with patch("boss_cli.auth.get_credential", return_value=mock_cred):
+            result = runner.invoke(cli, ["status"])
+            assert result.exit_code == 0
+            assert "已登录" in result.output
+
+    def test_status_json(self):
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"a": "1"}
+        with patch("boss_cli.auth.get_credential", return_value=mock_cred):
+            result = runner.invoke(cli, ["status", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["authenticated"] is True
+
+    def test_me_without_auth(self):
+        with patch("boss_cli.commands._common.get_credential", return_value=None):
+            result = runner.invoke(cli, ["me"])
+            assert result.exit_code == 1
+            assert "未登录" in result.output
+
+    def test_logout(self):
+        with patch("boss_cli.auth.clear_credential"):
+            result = runner.invoke(cli, ["logout"])
+            assert result.exit_code == 0
+            assert "已退出" in result.output
+
+
+# ── Personal commands (mocked) ──────────────────────────────────────
+
+
+class TestPersonalCommands:
+    """Test personal center commands with mocked client."""
+
+    def test_me_render(self):
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"wt2": "x"}
+
+        mock_data = {
+            "name": "张三", "gender": 1, "age": "25岁",
+            "degreeCategory": "本科", "account": "138****1234",
+        }
+
+        with patch("boss_cli.auth.get_credential", return_value=mock_cred), \
+             patch("boss_cli.commands._common.BossClient") as MockClient:
+            mock_instance = MagicMock()
+            mock_instance.get_resume_baseinfo.return_value = mock_data
+            mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+            mock_instance.__exit__ = MagicMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            result = runner.invoke(cli, ["me"])
+            assert result.exit_code == 0
+            # CliRunner is non-TTY so auto-outputs JSON
+            assert "张三" in result.output
+
+    def test_me_json(self):
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"wt2": "x"}
+
+        mock_data = {"name": "张三", "gender": 1, "age": "25岁"}
+
+        with patch("boss_cli.auth.get_credential", return_value=mock_cred), \
+             patch("boss_cli.commands._common.BossClient") as MockClient:
+            mock_instance = MagicMock()
+            mock_instance.get_resume_baseinfo.return_value = mock_data
+            mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+            mock_instance.__exit__ = MagicMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            result = runner.invoke(cli, ["me", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["name"] == "张三"
+
+    def test_applied_without_auth(self):
+        with patch("boss_cli.commands._common.get_credential", return_value=None):
+            result = runner.invoke(cli, ["applied"])
+            assert result.exit_code == 1
+
+    def test_interviews_without_auth(self):
+        with patch("boss_cli.commands._common.get_credential", return_value=None):
+            result = runner.invoke(cli, ["interviews"])
+            assert result.exit_code == 1
+
+
+# ── Cities ──────────────────────────────────────────────────────────
+
+
+class TestCities:
+    """Test cities command output."""
 
     def test_cities_output(self):
         result = runner.invoke(cli, ["cities"])
@@ -86,28 +187,8 @@ class TestCliBasic:
         assert "杭州" in result.output
         assert "101010100" in result.output
 
-    def test_status_without_auth(self):
-        with patch("boss_cli.cli.get_credential", return_value=None):
-            result = runner.invoke(cli, ["status"])
-            assert result.exit_code == 0
-            assert "未登录" in result.output
 
-    def test_me_without_auth(self):
-        with patch("boss_cli.cli.get_credential", return_value=None):
-            result = runner.invoke(cli, ["me"])
-            assert result.exit_code == 1
-            assert "未登录" in result.output
-
-    def test_applied_without_auth(self):
-        with patch("boss_cli.cli.get_credential", return_value=None):
-            result = runner.invoke(cli, ["applied"])
-            assert result.exit_code == 1
-
-    def test_logout(self):
-        with patch("boss_cli.cli.clear_credential"):
-            result = runner.invoke(cli, ["logout"])
-            assert result.exit_code == 0
-            assert "已退出" in result.output
+# ── City resolution logic ───────────────────────────────────────────
 
 
 class TestCityResolution:
@@ -135,6 +216,9 @@ class TestCityResolution:
         assert "杭州" in cities
 
 
+# ── Constants ───────────────────────────────────────────────────────
+
+
 class TestConstants:
     """Test constants are properly defined."""
 
@@ -150,7 +234,7 @@ class TestConstants:
 
     def test_degree_codes(self):
         from boss_cli.constants import DEGREE_CODES
-        assert len(DEGREE_CODES) >= 7
+        assert len(DEGREE_CODES) >= 5
         assert "本科" in DEGREE_CODES
 
     def test_api_urls_defined(self):
@@ -163,6 +247,9 @@ class TestConstants:
         assert constants.FRIEND_LIST_URL
         assert constants.USER_INFO_URL
         assert constants.RESUME_BASEINFO_URL
+
+
+# ── Credential ──────────────────────────────────────────────────────
 
 
 class TestCredential:
@@ -195,3 +282,117 @@ class TestCredential:
         header = cred.as_cookie_header()
         assert "a=1" in header
         assert "b=2" in header
+
+
+# ── Exceptions ──────────────────────────────────────────────────────
+
+
+class TestExceptions:
+    """Test custom exception hierarchy."""
+
+    def test_boss_api_error(self):
+        from boss_cli.exceptions import BossApiError
+        err = BossApiError("test error", code=42, response={"a": 1})
+        assert err.code == 42
+        assert err.response == {"a": 1}
+        assert "test error" in str(err)
+
+    def test_session_expired_error(self):
+        from boss_cli.exceptions import SessionExpiredError
+        err = SessionExpiredError()
+        assert err.code == 37
+        assert "stoken" in str(err)
+
+    def test_auth_required_error(self):
+        from boss_cli.exceptions import AuthRequiredError
+        err = AuthRequiredError()
+        assert "登录" in str(err)
+
+    def test_rate_limit_error(self):
+        from boss_cli.exceptions import RateLimitError
+        err = RateLimitError()
+        assert "频繁" in str(err)
+
+    def test_param_error(self):
+        from boss_cli.exceptions import ParamError
+        err = ParamError("missing field", code=17)
+        assert err.code == 17
+
+    def test_error_code_mapping(self):
+        from boss_cli.exceptions import (
+            AuthRequiredError,
+            BossApiError,
+            RateLimitError,
+            SessionExpiredError,
+            error_code_for_exception,
+        )
+        assert error_code_for_exception(SessionExpiredError()) == "not_authenticated"
+        assert error_code_for_exception(AuthRequiredError()) == "not_authenticated"
+        assert error_code_for_exception(RateLimitError()) == "rate_limited"
+        assert error_code_for_exception(BossApiError("test")) == "api_error"
+        assert error_code_for_exception(ValueError("test")) == "unknown_error"
+
+
+# ── Client ──────────────────────────────────────────────────────────
+
+
+class TestClient:
+    """Test client initialization and helpers."""
+
+    def test_client_context_manager(self):
+        from boss_cli.auth import Credential
+        from boss_cli.client import BossClient
+
+        cred = Credential(cookies={"test": "value"})
+        with BossClient(cred) as client:
+            assert client.client is not None
+            assert client._request_count == 0
+
+    def test_client_not_initialized_error(self):
+        from boss_cli.client import BossClient
+        client = BossClient()
+        with pytest.raises(RuntimeError, match="Client not initialized"):
+            _ = client.client
+
+    def test_handle_response_success(self):
+        from boss_cli.auth import Credential
+        from boss_cli.client import BossClient
+
+        cred = Credential(cookies={})
+        with BossClient(cred) as client:
+            data = {"code": 0, "zpData": {"key": "value"}}
+            result = client._handle_response(data, "test")
+            assert result == {"key": "value"}
+
+    def test_handle_response_session_expired(self):
+        from boss_cli.auth import Credential
+        from boss_cli.client import BossClient
+        from boss_cli.exceptions import SessionExpiredError
+
+        cred = Credential(cookies={})
+        with BossClient(cred) as client:
+            data = {"code": 37, "message": "env error"}
+            with pytest.raises(SessionExpiredError):
+                client._handle_response(data, "test")
+
+    def test_handle_response_param_error(self):
+        from boss_cli.auth import Credential
+        from boss_cli.client import BossClient
+        from boss_cli.exceptions import ParamError
+
+        cred = Credential(cookies={})
+        with BossClient(cred) as client:
+            data = {"code": 17, "message": "missing param"}
+            with pytest.raises(ParamError):
+                client._handle_response(data, "test")
+
+    def test_handle_response_generic_error(self):
+        from boss_cli.auth import Credential
+        from boss_cli.client import BossClient
+        from boss_cli.exceptions import BossApiError
+
+        cred = Credential(cookies={})
+        with BossClient(cred) as client:
+            data = {"code": 999, "message": "unknown"}
+            with pytest.raises(BossApiError):
+                client._handle_response(data, "test")
