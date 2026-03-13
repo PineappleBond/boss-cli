@@ -21,9 +21,20 @@ JOB_SEARCH_URL = "/wapi/zpgeek/search/joblist.json"
 JOB_RECOMMEND_URL = "/wapi/zpgeek/pc/recommend/job/list.json"
 JOB_CARD_URL = "/wapi/zpgeek/job/card.json"
 JOB_DETAIL_URL = "/wapi/zpgeek/job/detail.json"
+JOB_HISTORY_URL = "/wapi/zpgeek/history/joblist.json"
 
-# ── Friend / Chat API ──────────────────────────────────────────────
+# ── Personal Center API ─────────────────────────────────────────────
+USER_INFO_URL = "/wapi/zpuser/wap/getUserInfo.json"
+RESUME_BASEINFO_URL = "/wapi/zpgeek/resume/baseinfo/query.json"
+RESUME_EXPECT_URL = "/wapi/zpgeek/resume/expect/query.json"
+RESUME_STATUS_URL = "/wapi/zpgeek/resume/status.json"
+DELIVER_LIST_URL = "/wapi/zprelation/resume/geekDeliverList"
+INTERVIEW_DATA_URL = "/wapi/zpinterview/geek/interview/data.json"
+
+# ── Social / Chat API ──────────────────────────────────────────────
 FRIEND_LIST_URL = "/wapi/zprelation/friend/getGeekFriendList.json"
+FRIEND_ADD_URL = "/wapi/zpgeek/friend/add.json"
+GEEK_GET_JOB_URL = "/wapi/zprelation/interaction/geekGetJob"
 
 # ── Request Headers (Chrome 133, macOS) ─────────────────────────────
 HEADERS = {
