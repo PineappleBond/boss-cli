@@ -47,6 +47,7 @@ cli.add_command(search.recommend)
 cli.add_command(search.detail)
 cli.add_command(search.show)
 cli.add_command(search.export)
+cli.add_command(search.history)
 cli.add_command(search.cities)
 
 # ─── Personal Center commands ────────────────────────────────────────

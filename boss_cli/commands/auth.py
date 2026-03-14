@@ -19,16 +19,34 @@ logger = logging.getLogger(__name__)
 
 
 @click.command()
-def login() -> None:
+@click.option("--qrcode", is_flag=True, help="使用二维码扫码登录")
+@click.option("--cookie-source", default=None, help="指定浏览器 (chrome/firefox/edge/brave/arc/safari等)")
+def login(qrcode: bool, cookie_source: str | None) -> None:
     """扫码登录 Boss 直聘 APP"""
-    from ..auth import qr_login
-    import asyncio
-
-    try:
-        asyncio.run(qr_login())
-    except RuntimeError as e:
-        console.print(f"[red]❌ {e}[/red]")
-        raise SystemExit(1) from None
+    if qrcode:
+        from ..auth import qr_login
+        import asyncio
+        try:
+            asyncio.run(qr_login())
+        except RuntimeError as e:
+            console.print(f"[red]❌ {e}[/red]")
+            raise SystemExit(1) from None
+    else:
+        from ..auth import extract_browser_credential
+        # Try browser cookies first
+        cred = extract_browser_credential(cookie_source=cookie_source)
+        if cred:
+            console.print(f"[green]✅ 登录成功！[/green] ({len(cred.cookies)} cookies)")
+        else:
+            # Fallback to QR login
+            console.print("[yellow]未找到浏览器 Cookie，尝试二维码登录...[/yellow]")
+            from ..auth import qr_login
+            import asyncio
+            try:
+                asyncio.run(qr_login())
+            except RuntimeError as e:
+                console.print(f"[red]❌ {e}[/red]")
+                raise SystemExit(1) from None
 
 
 @click.command()
@@ -46,7 +64,12 @@ def status(as_json: bool, as_yaml: bool) -> None:
     from ..auth import get_credential
     cred = get_credential()
     if cred:
-        data = {"authenticated": True, "cookie_count": len(cred.cookies)}
+        cookie_names = sorted(cred.cookies.keys())
+        data = {
+            "authenticated": True,
+            "cookie_count": len(cred.cookies),
+            "cookies": cookie_names,
+        }
         if as_json:
             click.echo(json.dumps(data, indent=2, ensure_ascii=False))
         elif as_yaml:
@@ -57,7 +80,10 @@ def status(as_json: bool, as_yaml: bool) -> None:
                 click.echo(json.dumps(data, indent=2, ensure_ascii=False))
         else:
             n = len(cred.cookies)
+            keys = ", ".join(cookie_names[:5])
+            extra = f" (+{n - 5} more)" if n > 5 else ""
             console.print(f"[green]✅ 已登录[/green] ({n} cookies)")
+            console.print(f"  [dim]{keys}{extra}[/dim]")
     else:
         if as_json:
             click.echo(json.dumps({"authenticated": False}))

@@ -14,7 +14,6 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -118,8 +117,13 @@ def clear_credential() -> None:
 
 # ── Browser cookie extraction ───────────────────────────────────────
 
-def extract_browser_credential() -> Credential | None:
-    """Extract Boss Zhipin cookies from local browsers via browser-cookie3."""
+def extract_browser_credential(cookie_source: str | None = None) -> Credential | None:
+    """Extract Boss Zhipin cookies from local browsers via browser-cookie3.
+
+    Args:
+        cookie_source: Optional browser name to extract from (e.g., 'chrome', 'arc').
+                       If None, tries all supported browsers in order.
+    """
     extract_script = '''
 import json, sys
 try:
@@ -128,12 +132,30 @@ except ImportError:
     print(json.dumps({"error": "not_installed"}))
     sys.exit(0)
 
+target = sys.argv[1] if len(sys.argv) > 1 else None
+
 browsers = [
     ("Chrome", bc3.chrome),
     ("Firefox", bc3.firefox),
     ("Edge", bc3.edge),
     ("Brave", bc3.brave),
+    ("Chromium", bc3.chromium),
+    ("Opera", bc3.opera),
+    ("Vivaldi", bc3.vivaldi),
 ]
+
+# Try adding optional browsers (not all browser_cookie3 versions support these)
+for name, attr in [("Arc", "arc"), ("Safari", "safari"), ("LibreWolf", "librewolf")]:
+    fn = getattr(bc3, attr, None)
+    if fn:
+        browsers.append((name, fn))
+
+if target:
+    target_lower = target.lower()
+    browsers = [(n, fn) for n, fn in browsers if n.lower() == target_lower]
+    if not browsers:
+        print(json.dumps({"error": f"unsupported_browser: {target}"}))
+        sys.exit(0)
 
 for name, loader in browsers:
     try:
@@ -149,8 +171,12 @@ print(json.dumps({"error": "no_cookies"}))
 '''
 
     try:
+        cmd = [sys.executable, "-c", extract_script]
+        if cookie_source:
+            cmd.append(cookie_source)
+
         result = subprocess.run(
-            [sys.executable, "-c", extract_script],
+            cmd,
             capture_output=True,
             text=True,
             timeout=15,
@@ -169,7 +195,7 @@ print(json.dumps({"error": "no_cookies"}))
             if data["error"] == "not_installed":
                 logger.debug("browser-cookie3 not installed, skipping")
             else:
-                logger.debug("No valid Boss Zhipin cookies found in any browser")
+                logger.debug("No valid Boss Zhipin cookies found: %s", data["error"])
             return None
 
         cookies = data["cookies"]
@@ -339,7 +365,7 @@ async def qr_login() -> Credential:
         # Step 2: Display QR code in terminal using Unicode half-blocks
         print("\n📱 请使用 Boss 直聘 APP 扫描以下二维码登录:\n")
         _display_qr_in_terminal(qr_id)
-        print(f"\n⏳ 扫码后请在手机上确认登录...")
+        print("\n⏳ 扫码后请在手机上确认登录...")
         print(f"   (QR ID: {qr_id[:20]}...)\n")
 
         # Step 3: Wait for scan

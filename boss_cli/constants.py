@@ -36,14 +36,14 @@ FRIEND_LIST_URL = "/wapi/zprelation/friend/getGeekFriendList.json"
 FRIEND_ADD_URL = "/wapi/zpgeek/friend/add.json"
 GEEK_GET_JOB_URL = "/wapi/zprelation/interaction/geekGetJob"
 
-# ── Request Headers (Chrome 133, macOS) ─────────────────────────────
+# ── Request Headers (Chrome 145, macOS) ─────────────────────────────
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/133.0.0.0 Safari/537.36"
+        "Chrome/145.0.0.0 Safari/537.36"
     ),
-    "sec-ch-ua": '"Chromium";v="133", "Not(A:Brand";v="99", "Google Chrome";v="133"',
+    "sec-ch-ua": '"Chromium";v="145", "Not(A:Brand";v="99", "Google Chrome";v="145"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"macOS"',
     "Sec-Fetch-Dest": "empty",

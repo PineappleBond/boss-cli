@@ -33,7 +33,7 @@ class TestCliBasic:
         result = runner.invoke(cli, ["--help"])
         expected = [
             "login", "status", "logout", "me",
-            "search", "recommend", "cities", "detail", "show", "export",
+            "search", "recommend", "cities", "detail", "show", "export", "history",
             "applied", "interviews",
             "chat", "greet", "batch-greet",
         ]
@@ -46,7 +46,7 @@ class TestCommandHelp:
 
     @pytest.mark.parametrize("cmd", [
         "login", "logout", "status", "me",
-        "search", "recommend", "cities", "detail", "show", "export",
+        "search", "recommend", "cities", "detail", "show", "export", "history",
         "applied", "interviews",
         "chat", "greet", "batch-greet",
     ])
@@ -71,6 +71,21 @@ class TestCommandHelp:
         assert "--dry-run" in result.output
         assert "--count" in result.output or "-n" in result.output
         assert "--yes" in result.output or "-y" in result.output
+
+    def test_greet_has_output_options(self):
+        result = runner.invoke(cli, ["greet", "--help"])
+        assert "--json" in result.output
+        assert "--yaml" in result.output
+
+    def test_login_has_cookie_source(self):
+        result = runner.invoke(cli, ["login", "--help"])
+        assert "--cookie-source" in result.output
+        assert "--qrcode" in result.output
+
+    def test_history_has_options(self):
+        result = runner.invoke(cli, ["history", "--help"])
+        assert "--page" in result.output or "-p" in result.output
+        assert "--json" in result.output
 
 
 # ── Auth commands (mocked) ──────────────────────────────────────────
@@ -160,7 +175,8 @@ class TestPersonalCommands:
             result = runner.invoke(cli, ["me", "--json"])
             assert result.exit_code == 0
             data = json.loads(result.output)
-            assert data["name"] == "张三"
+            assert data["ok"] is True
+            assert data["data"]["name"] == "张三"
 
     def test_applied_without_auth(self):
         with patch("boss_cli.commands._common.get_credential", return_value=None):
@@ -505,4 +521,75 @@ class TestNewCommandHelp:
         assert "--format" in result.output
         assert "csv" in result.output
         assert "--output" in result.output
+
+    def test_history_help(self):
+        result = runner.invoke(cli, ["history", "--help"])
+        assert result.exit_code == 0
+        assert "浏览历史" in result.output
+
+
+# ── Search mock test ────────────────────────────────────────────────
+
+
+class TestSearchMock:
+    """Test search command with mocked client."""
+
+    def test_search_json(self):
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"wt2": "x"}
+
+        mock_data = {"jobList": [{"jobName": "Go Dev", "securityId": "abc"}], "hasMore": False}
+
+        with patch("boss_cli.commands._common.get_credential", return_value=mock_cred), \
+             patch("boss_cli.commands._common.BossClient") as MockClient:
+            mock_instance = MagicMock()
+            mock_instance.search_jobs.return_value = mock_data
+            mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+            mock_instance.__exit__ = MagicMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            result = runner.invoke(cli, ["search", "golang", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["ok"] is True
+            assert "data" in data
+
+
+# ── Schema envelope test ────────────────────────────────────────────
+
+
+class TestSchemaEnvelope:
+    """Test that structured output uses the schema envelope."""
+
+    def test_status_json_has_no_envelope(self):
+        """status uses direct output, not envelope (for backward compat)."""
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"a": "1"}
+        with patch("boss_cli.auth.get_credential", return_value=mock_cred):
+            result = runner.invoke(cli, ["status", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["authenticated"] is True
+
+    def test_me_json_has_envelope(self):
+        """me command uses handle_command, should have envelope."""
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"wt2": "x"}
+
+        mock_data = {"name": "张三", "gender": 1}
+
+        with patch("boss_cli.commands._common.get_credential", return_value=mock_cred), \
+             patch("boss_cli.commands._common.BossClient") as MockClient:
+            mock_instance = MagicMock()
+            mock_instance.get_resume_baseinfo.return_value = mock_data
+            mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+            mock_instance.__exit__ = MagicMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            result = runner.invoke(cli, ["me", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["ok"] is True
+            assert data["schema_version"] == "1"
+            assert data["data"]["name"] == "张三"
 

@@ -1,4 +1,4 @@
-"""Search and browse commands: search, recommend, cities, detail, show, export."""
+"""Search and browse commands: search, recommend, cities, detail, show, export, history."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import csv
 import io
 import json
 import logging
-import sys
 
 import click
 from rich.panel import Panel
@@ -20,28 +19,11 @@ from ._common import (
     console,
     handle_command,
     require_auth,
+    run_client_action,
     structured_output_options,
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ── Helpers ─────────────────────────────────────────────────────────
-
-def _output_or_render(
-    data: dict, *, as_json: bool, as_yaml: bool, render: callable,
-) -> None:
-    """Route output: --json → JSON, --yaml/non-TTY → YAML, else → rich render."""
-    if as_json:
-        click.echo(json.dumps(data, indent=2, ensure_ascii=False))
-    elif as_yaml or not sys.stdout.isatty():
-        try:
-            import yaml
-            click.echo(yaml.dump(data, allow_unicode=True, default_flow_style=False))
-        except ImportError:
-            click.echo(json.dumps(data, indent=2, ensure_ascii=False))
-    else:
-        render(data)
 
 
 # ── Helper: render job table ────────────────────────────────────────
@@ -86,7 +68,7 @@ def _render_job_table(
         )
 
     console.print(table)
-    console.print(f"  [dim]💡 使用 boss show <编号> 查看职位详情[/dim]")
+    console.print("  [dim]💡 使用 boss show <编号> 查看职位详情[/dim]")
 
     if hint_next:
         console.print(f"  [dim]▸ {hint_next}[/dim]")
@@ -104,49 +86,42 @@ def _render_job_table(
 @structured_output_options
 def search(keyword: str, city: str, page: int, salary: str | None, exp: str | None, degree: str | None, as_json: bool, as_yaml: bool) -> None:
     """搜索职位 (例: boss search Python --city 北京)"""
-    from ..auth import get_credential
-    cred = get_credential()
+    cred = require_auth()
 
     city_code = resolve_city(city)
     salary_code = SALARY_CODES.get(salary) if salary else None
     exp_code = EXP_CODES.get(exp) if exp else None
     degree_code = DEGREE_CODES.get(degree) if degree else None
 
-    try:
-        with BossClient(cred) as client:
-            data = client.search_jobs(
-                query=keyword, city=city_code, page=page,
-                experience=exp_code, degree=degree_code, salary=salary_code,
-            )
+    def _action(c: BossClient) -> dict:
+        return c.search_jobs(
+            query=keyword, city=city_code, page=page,
+            experience=exp_code, degree=degree_code, salary=salary_code,
+        )
 
-        # Always save index cache for `boss show` navigation
+    def _render(data: dict) -> None:
         job_list = data.get("jobList", [])
+        # Always save index cache for `boss show` navigation
         if job_list:
             save_index(job_list, source=f"search:{keyword}")
 
-        if as_json:
-            click.echo(json.dumps(data, indent=2, ensure_ascii=False))
-        elif as_yaml or not sys.stdout.isatty():
-            try:
-                import yaml
-                click.echo(yaml.dump(data, allow_unicode=True, default_flow_style=False))
-            except ImportError:
-                click.echo(json.dumps(data, indent=2, ensure_ascii=False))
-        else:
-            filters = [city]
-            if salary: filters.append(salary)
-            if exp: filters.append(exp)
-            if degree: filters.append(degree)
-            filter_str = " · ".join(filters)
+        filters = [city]
+        if salary:
+            filters.append(salary)
+        if exp:
+            filters.append(exp)
+        if degree:
+            filters.append(degree)
+        filter_str = " · ".join(filters)
 
-            _render_job_table(
-                job_list,
-                title=f"🔍 搜索: {keyword} ({filter_str})",
-                page=page,
-                hint_next=f"更多结果: boss search \"{keyword}\" --city {city} -p {page + 1}" if data.get("hasMore") else "",
-            )
-    except BossApiError as exc:
-        console.print(f"[red]❌ 搜索失败: {exc}[/red]")
+        _render_job_table(
+            job_list,
+            title=f"🔍 搜索: {keyword} ({filter_str})",
+            page=page,
+            hint_next=f"更多结果: boss search \"{keyword}\" --city {city} -p {page + 1}" if data.get("hasMore") else "",
+        )
+
+    handle_command(cred, action=_action, render=_render, as_json=as_json, as_yaml=as_yaml)
 
 
 # ── recommend ───────────────────────────────────────────────────────
@@ -180,15 +155,12 @@ def recommend(page: int, as_json: bool, as_yaml: bool) -> None:
 @structured_output_options
 def detail(security_id: str, as_json: bool, as_yaml: bool) -> None:
     """查看职位详情 (需要 securityId 或使用 boss show)"""
-    from ..auth import get_credential
-    cred = get_credential()
+    cred = require_auth()
 
-    try:
-        with BossClient(cred) as client:
-            data = client.get_job_detail(security_id=security_id)
-        _output_or_render(data, as_json=as_json, as_yaml=as_yaml, render=_render_detail)
-    except BossApiError as exc:
-        console.print(f"[red]❌ 获取详情失败: {exc}[/red]")
+    def _action(c: BossClient) -> dict:
+        return c.get_job_detail(security_id=security_id)
+
+    handle_command(cred, action=_action, render=_render_detail, as_json=as_json, as_yaml=as_yaml)
 
 
 # ── show (short-index) ──────────────────────────────────────────────
@@ -224,15 +196,12 @@ def show(index: int, as_json: bool, as_yaml: bool) -> None:
     console.print()
 
     # Fetch full detail
-    from ..auth import get_credential
-    cred = get_credential()
+    cred = require_auth()
 
-    try:
-        with BossClient(cred) as client:
-            data = client.get_job_detail(security_id=security_id)
-        _output_or_render(data, as_json=as_json, as_yaml=as_yaml, render=_render_detail)
-    except BossApiError as exc:
-        console.print(f"[red]❌ 获取详情失败: {exc}[/red]")
+    def _action(c: BossClient) -> dict:
+        return c.get_job_detail(security_id=security_id)
+
+    handle_command(cred, action=_action, render=_render_detail, as_json=as_json, as_yaml=as_yaml)
 
 
 def _render_detail(data: dict) -> None:
@@ -298,8 +267,7 @@ def export(keyword: str, city: str, count: int, salary: str | None, exp: str | N
 
     例: boss export "golang" --city 杭州 -n 50 -o jobs.csv
     """
-    from ..auth import get_credential
-    cred = get_credential()
+    cred = require_auth()
 
     city_code = resolve_city(city)
     salary_code = SALARY_CODES.get(salary) if salary else None
@@ -307,25 +275,25 @@ def export(keyword: str, city: str, count: int, salary: str | None, exp: str | N
     degree_code = DEGREE_CODES.get(degree) if degree else None
 
     all_jobs: list[dict] = []
-    page = 1
     pages_needed = (count + 14) // 15  # 15 per page
 
     try:
-        with BossClient(cred) as client:
-            for page in range(1, pages_needed + 1):
-                data = client.search_jobs(
-                    query=keyword, city=city_code, page=page,
+        def _collect(c: BossClient) -> list[dict]:
+            nonlocal all_jobs
+            for pg in range(1, pages_needed + 1):
+                data = c.search_jobs(
+                    query=keyword, city=city_code, page=pg,
                     experience=exp_code, degree=degree_code, salary=salary_code,
                 )
                 job_list = data.get("jobList", [])
                 all_jobs.extend(job_list)
-                console.print(f"  [dim]📦 第 {page} 页: {len(job_list)} 个职位 (累计: {len(all_jobs)})[/dim]")
+                console.print(f"  [dim]📦 第 {pg} 页: {len(job_list)} 个职位 (累计: {len(all_jobs)})[/dim]")
 
                 if not data.get("hasMore", False) or len(all_jobs) >= count:
                     break
+            return all_jobs[:count]
 
-        # Trim to requested count
-        all_jobs = all_jobs[:count]
+        all_jobs = run_client_action(cred, _collect)
 
         if fmt == "json":
             output_text = json.dumps(all_jobs, indent=2, ensure_ascii=False)
@@ -358,6 +326,30 @@ def export(keyword: str, city: str, count: int, salary: str | None, exp: str | N
 
     except BossApiError as exc:
         console.print(f"[red]❌ 导出失败: {exc}[/red]")
+
+
+# ── history ─────────────────────────────────────────────────────────
+
+@click.command()
+@click.option("-p", "--page", default=1, type=int, help="页码 (默认: 1)")
+@structured_output_options
+def history(page: int, as_json: bool, as_yaml: bool) -> None:
+    """查看浏览历史"""
+    cred = require_auth()
+
+    def _action(c: BossClient) -> dict:
+        return c.get_job_history(page=page)
+
+    def _render(data: dict) -> None:
+        job_list = data.get("jobList", [])
+        _render_job_table(
+            job_list,
+            title=f"📜 浏览历史 (第 {page} 页)",
+            page=page,
+            hint_next=f"更多: boss history -p {page + 1}" if data.get("hasMore") else "",
+        )
+
+    handle_command(cred, action=_action, render=_render, as_json=as_json, as_yaml=as_yaml)
 
 
 # ── cities ──────────────────────────────────────────────────────────

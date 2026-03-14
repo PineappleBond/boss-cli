@@ -27,6 +27,9 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.11.0",
 ]
+yaml = [
+    "pyyaml>=6.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/jackwener/boss-cli"

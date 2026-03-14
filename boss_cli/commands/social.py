@@ -59,18 +59,20 @@ def chat_list(as_json: bool, as_yaml: bool) -> None:
 @click.command()
 @click.argument("security_id")
 @click.option("--lid", default="", help="Lid parameter from search results")
-def greet(security_id: str, lid: str) -> None:
+@structured_output_options
+def greet(security_id: str, lid: str, as_json: bool, as_yaml: bool) -> None:
     """向 Boss 打招呼 / 投递简历 (需要 securityId)"""
     cred = require_auth()
 
-    try:
-        with BossClient(cred) as client:
-            data = client.add_friend(security_id=security_id, lid=lid)
-            console.print("[green]✅ 打招呼成功！[/green]")
-            if data:
-                click.echo(json.dumps(data, indent=2, ensure_ascii=False))
-    except BossApiError as exc:
-        console.print(f"[red]❌ 打招呼失败: {exc}[/red]")
+    def _action(c):
+        return c.add_friend(security_id=security_id, lid=lid)
+
+    def _render(data: dict) -> None:
+        console.print("[green]✅ 打招呼成功！[/green]")
+        if data:
+            click.echo(json.dumps(data, indent=2, ensure_ascii=False))
+
+    handle_command(cred, action=_action, render=_render, as_json=as_json, as_yaml=as_yaml)
 
 
 @click.command("batch-greet")
@@ -149,6 +151,10 @@ def batch_greet(keyword: str, city: str, count: int, salary: str | None, exp: st
                     success += 1
                 except BossApiError as e:
                     console.print(f"  [{i}] [red]❌ {job_name}: {e}[/red]")
+
+                # Explicit rate-limit delay between greetings to avoid detection
+                if i < len(targets):
+                    time.sleep(1.5)
 
             console.print(f"\n[bold]完成: {success}/{len(targets)} 个打招呼成功[/bold]")
 
