@@ -1,6 +1,7 @@
 # boss-cli
 
 [![PyPI version](https://img.shields.io/pypi/v/boss-cli.svg)](https://pypi.org/project/boss-cli/)
+[![CI](https://github.com/jackwener/boss-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/jackwener/boss-cli/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue.svg)](https://pypi.org/project/boss-cli/)
 
 A CLI for BOSS 直聘 — search jobs, view recommendations, manage applications, and chat with recruiters via reverse-engineered API 🤝
@@ -18,15 +19,18 @@ A CLI for BOSS 直聘 — search jobs, view recommendations, manage applications
 
 ## Features
 
-- 🔐 **Auth** — auto-extract browser cookies, QR code login (Unicode half-block rendering), status check
+- 🔐 **Auth** — auto-extract browser cookies (10+ browsers), QR code login, `--cookie-source` explicit browser selection
 - 🔍 **Search** — jobs by keyword with city/salary/experience/degree filters
 - ⭐ **Recommendations** — personalized job recommendations based on profile
+- 📋 **Detail & Export** — view full job details, short-index navigation (`boss show 3`), CSV/JSON export
+- 📜 **History** — browse job viewing history
 - 👤 **Profile** — view personal info, resume status
 - 📮 **Applications** — view applied jobs list
 - 📋 **Interviews** — view interview invitations
 - 💬 **Chat** — view communicated boss list
-- 🤝 **Greet** — send greetings to recruiters, single or batch
+- 🤝 **Greet** — send greetings to recruiters, single or batch (with 1.5s rate-limit delay)
 - 🏙️ **Cities** — 40+ supported cities
+- 🤖 **Agent-friendly** — structured output envelope (`{ok, schema_version, data}`), Rich output on stderr
 
 ## Installation
 
@@ -36,6 +40,9 @@ uv tool install boss-cli
 
 # Or: pipx
 pipx install boss-cli
+
+# Optional: YAML output support
+pip install boss-cli[yaml]
 ```
 
 Upgrade to the latest version:
@@ -57,8 +64,10 @@ uv sync
 
 ```bash
 # ─── Auth ─────────────────────────────────────────
-boss login                             # QR code login (scan with Boss app)
-boss status                            # Check login status
+boss login                             # Auto-detect browser cookies, fallback to QR
+boss login --cookie-source chrome      # Extract from specific browser
+boss login --qrcode                    # QR code login only
+boss status                            # Check login status (shows cookie names)
 boss logout                            # Clear saved cookies
 
 # ─── Search ───────────────────────────────────────
@@ -72,58 +81,73 @@ boss search "后端" --city 深圳 -p 2    # Pagination
 # ─── Detail & Export ──────────────────────────────
 boss show 3                            # View job #3 from last search
 boss detail <securityId>               # View full job details
-boss detail <securityId> --json        # JSON output
+boss detail <securityId> --json        # JSON output (with schema envelope)
 boss export "Python" -n 50 -o jobs.csv # Export search results to CSV
 boss export "golang" --format json -o jobs.json  # Export as JSON
 
 # ─── Recommendations ──────────────────────────────
 boss recommend                         # View recommended jobs
-boss recommend -p 2                    # Next page
+boss recommend -p 2 --json             # Next page, JSON output
 
 # ─── Personal Center ─────────────────────────────
 boss me                                # View profile
+boss me --json                         # JSON output
 boss applied                           # View applied jobs
 boss interviews                        # View interview invitations
+boss history                           # View browsing history
 boss chat                              # View communicated bosses
 
 # ─── Greet ────────────────────────────────────────
 boss greet <securityId>                # Send greeting to a boss
+boss greet <securityId> --json         # JSON result
 boss batch-greet "golang" --city 杭州 -n 5          # Batch greet top 5
 boss batch-greet "Python" --salary 20-30K --dry-run  # Preview only
 
 # ─── Utilities ────────────────────────────────────
 boss cities                            # List supported cities
 boss --version                         # Show version
+boss -v search "Python"                # Verbose logging (request timing)
 ```
+
+## Structured Output
+
+All commands with `--json` / `--yaml` use a unified output envelope (see [SCHEMA.md](./SCHEMA.md)):
+
+```json
+{
+  "ok": true,
+  "schema_version": "1",
+  "data": { ... }
+}
+```
+
+- **Non-TTY stdout** → auto YAML (agent-friendly)
+- **`--json`** → explicit JSON
+- **Rich output** → stderr (won't pollute pipes: `boss search X --json | jq .data`)
 
 ## Authentication
 
 boss-cli supports multiple authentication methods:
 
 1. **Saved cookies** — loads from `~/.config/boss-cli/credential.json`
-2. **Browser cookies** — auto-detects installed browsers and extracts cookies (supports Chrome, Firefox, Edge, Brave)
+2. **Browser cookies** — auto-detects installed browsers (Chrome, Firefox, Edge, Brave, Arc, Chromium, Opera, Vivaldi, Safari, LibreWolf)
 3. **QR code login** — terminal QR output using Unicode half-blocks, scan with Boss 直聘 APP
 
-`boss login` triggers QR code login. Other authenticated commands automatically try saved cookies first, then browser extraction.
+`boss login` auto-extracts browser cookies first, falls back to QR login. Use `--cookie-source chrome` to specify a browser, or `--qrcode` to skip browser detection.
 
 ### Cookie TTL & Auto-Refresh
 
 Saved cookies auto-refresh from browser after **7 days**. If browser refresh fails, falls back to stale cookies and logs a warning.
 
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BOSS_CLI_CONFIG` | `~/.config/boss-cli` | Config directory path |
-
 ## Rate Limiting & Anti-Detection
 
 - **Gaussian jitter**: request delays with `random.gauss(0.3, 0.15)`
 - **Random long pauses**: 5% chance of 2-5s pause to mimic reading
+- **Rate-limit auto-cooldown**: code=9 triggers exponential backoff (10s→20s→40s→60s) + request delay doubling
 - **Exponential backoff**: auto-retry on HTTP 429/5xx (max 3 retries)
 - **Response cookie merge**: `Set-Cookie` headers merged back into session
 - **HTML redirect detection**: catches auth redirects to login page
-- **Browser fingerprint**: macOS Chrome 133 UA, `sec-ch-ua` headers
+- **Browser fingerprint**: macOS Chrome 145 UA, `sec-ch-ua`, `DNT`, `Priority` headers
 - **Request logging**: `boss -v` shows request URLs, status codes, and timing
 
 ## Use as AI Agent Skill
@@ -149,18 +173,17 @@ clawhub install boss-cli
 boss_cli/
 ├── __init__.py           # Package version
 ├── cli.py                # Click entry point (lightweight, add_command only)
-├── client.py             # API client (rate-limit, retry, anti-detection)
-├── auth.py               # Authentication (browser-cookie3, QR login, TTL refresh)
-├── constants.py          # URLs, headers, city codes, filter enums
+├── client.py             # API client (rate-limit, cooldown, retry, anti-detection)
+├── auth.py               # Authentication (10+ browsers, QR login, TTL refresh)
+├── constants.py          # URLs, headers (Chrome 145), city codes, filter enums
 ├── exceptions.py         # Structured exceptions (BossApiError hierarchy)
 ├── index_cache.py        # Short-index cache for `boss show`
 └── commands/
-    ├── __init__.py
-    ├── _common.py        # handle_command, structured_output_options
-    ├── auth.py           # login, logout, status, me
-    ├── search.py         # search, recommend, detail, show, export, cities
+    ├── _common.py        # SCHEMA envelope, handle_command, stderr console
+    ├── auth.py           # login (--cookie-source/--qrcode), logout, status, me
+    ├── search.py         # search, recommend, detail, show, export, history, cities
     ├── personal.py       # applied, interviews
-    └── social.py         # chat, greet, batch-greet
+    └── social.py         # chat, greet (--json), batch-greet (1.5s delay)
 ```
 
 ## Development
@@ -197,42 +220,48 @@ Check your city filter. Some keywords are city-specific. Use `boss cities` to se
 
 ## 功能特性
 
-- 🔐 **认证** — 自动提取浏览器 Cookie，二维码扫码登录（Unicode 半块渲染），状态检查
+- 🔐 **认证** — 自动提取浏览器 Cookie（10+ 浏览器），二维码扫码登录，`--cookie-source` 指定浏览器
 - 🔍 **搜索** — 按关键词搜索职位，支持城市/薪资/经验/学历筛选
 - ⭐ **推荐** — 基于求职期望的个性化推荐
+- 📋 **详情 & 导出** — 职位详情，编号导航 (`boss show 3`)，CSV/JSON 导出
+- 📜 **历史** — 查看浏览历史
 - 👤 **个人** — 查看个人资料
 - 📮 **投递** — 查看已投递职位列表
 - 📋 **面试** — 查看面试邀请
 - 💬 **沟通** — 查看沟通过的 Boss 列表
-- 🤝 **打招呼** — 向 Boss 打招呼/投递，支持批量操作
+- 🤝 **打招呼** — 向 Boss 打招呼/投递，支持批量操作（内置 1.5s 防风控延迟）
 - 🏙️ **城市** — 40+ 城市支持
+- 🤖 **Agent 友好** — 结构化输出 envelope，Rich 输出走 stderr
 
 ## 使用示例
 
 ```bash
 # 认证
-boss login                             # 二维码扫码登录
+boss login                             # 自动提取浏览器 Cookie，失败则二维码
+boss login --cookie-source chrome      # 指定浏览器
 boss status                            # 检查登录状态
 boss logout                            # 清除 Cookie
 
 # 搜索 & 详情
 boss search "golang" --city 杭州       # 按城市搜索
 boss show 3                            # 按编号查看详情
-boss detail <securityId> --json        # 指定 ID 查看
+boss detail <securityId> --json        # 指定 ID 查看（JSON envelope）
 boss export "Python" -n 50 -o jobs.csv # 导出 CSV
 
-# 推荐
+# 推荐 & 历史
 boss recommend                         # 个性化推荐
+boss history                           # 浏览历史
 
 # 个人中心
-boss me                                # 个人资料
+boss me --json                         # 个人资料（JSON）
 boss applied                           # 已投递
 boss interviews                        # 面试邀请
 boss chat                              # 沟通列表
 
 # 打招呼
-boss greet <securityId>                # 单个打招呼
+boss greet <securityId> --json         # 单个打招呼
 boss batch-greet "golang" -n 10        # 批量打招呼
+boss batch-greet "golang" --dry-run    # 预览
 
 # 工具
 boss cities                            # 城市列表

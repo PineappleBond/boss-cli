@@ -2,7 +2,7 @@
 name: boss-cli
 description: Use boss-cli for ALL BOSS 直聘 operations — searching jobs, viewing recommendations, managing applications, chatting with recruiters, and batch greeting. Invoke whenever the user requests any job search or recruitment platform interaction on BOSS 直聘.
 author: jackwener
-version: "0.1.0"
+version: "0.2.0"
 tags:
   - boss
   - zhipin
@@ -15,7 +15,7 @@ tags:
 # boss-cli — BOSS 直聘 CLI Tool
 
 **Binary:** `boss`
-**Credentials:** browser cookies (auto-extracted) or QR code login
+**Credentials:** browser cookies (auto-extracted from 10+ browsers) or QR code login (`--qrcode`)
 
 ## Setup
 
@@ -31,28 +31,51 @@ uv tool upgrade boss-cli
 
 ## Authentication
 
-**IMPORTANT FOR AGENTS**: Before executing ANY boss command, check if credentials exist first.
+**IMPORTANT FOR AGENTS**: Before executing ANY boss command, check if credentials exist first. Do NOT assume cookies are configured.
 
 ### Step 0: Check if already authenticated
 
 ```bash
-boss status 2>&1 | grep -q "已登录" && echo "AUTH_OK" || echo "AUTH_NEEDED"
+boss status --json 2>/dev/null | jq -r '.authenticated' | grep -q true && echo "AUTH_OK" || echo "AUTH_NEEDED"
 ```
 
 If `AUTH_OK`, skip to [Command Reference](#command-reference).
-If `AUTH_NEEDED`, guide user to login:
+If `AUTH_NEEDED`, proceed to Step 1.
+
+### Step 1: Guide user to authenticate
+
+Ensure user is logged into zhipin.com in any supported browser (Chrome, Firefox, Edge, Brave, Arc, Chromium, Opera, Vivaldi, Safari, LibreWolf). Then:
 
 ```bash
-boss login                              # QR code login — scan with Boss app
+boss login                              # auto-detect browser with valid cookies
+boss login --cookie-source chrome       # specify browser explicitly
+boss login --qrcode                     # QR code login — scan with Boss app
 ```
 
-### Step 1: Handle common auth issues
+Verify with:
+
+```bash
+boss status
+boss me --json | jq '.data.name'
+```
+
+### Step 2: Handle common auth issues
 
 | Symptom | Agent action |
 |---------|-------------|
 | `环境异常 (__zp_stoken__ 已过期)` | Run `boss logout && boss login` |
 | `未登录` | Run `boss login` |
+| Rate limited (code=9) | Auto-cooldown built-in; wait and retry |
 | API timeout | Check network, retry |
+
+## Agent Defaults
+
+All machine-readable output uses the envelope documented in [SCHEMA.md](./SCHEMA.md).
+Payloads live under `.data`.
+
+- Non-TTY stdout → auto YAML
+- `--json` / `--yaml` → explicit format
+- Rich output → **stderr** (safe for pipes: `boss search X --json | jq .data`)
 
 ## Command Reference
 
@@ -64,23 +87,24 @@ boss login                              # QR code login — scan with Boss app
 | `boss show <index>` | View job #N from last search | `boss show 3` |
 | `boss detail <securityId>` | View full job details | `boss detail abc123 --json` |
 | `boss export <keyword>` | Export search results to CSV/JSON | `boss export "Python" -n 50 -o jobs.csv` |
-| `boss recommend` | Personalized recommendations | `boss recommend -p 2` |
+| `boss recommend` | Personalized recommendations | `boss recommend -p 2 --json` |
+| `boss history` | View browsing history | `boss history --json` |
 | `boss cities` | List supported cities | `boss cities` |
 
 ### Personal Center
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `boss me` | View profile (name, age, degree) | `boss me --json-output` |
-| `boss applied` | View applied jobs | `boss applied -p 1` |
-| `boss interviews` | View interview invitations | `boss interviews` |
-| `boss chat` | View communicated bosses | `boss chat` |
+| `boss me` | View profile (name, age, degree) | `boss me --json` |
+| `boss applied` | View applied jobs | `boss applied -p 1 --json` |
+| `boss interviews` | View interview invitations | `boss interviews --json` |
+| `boss chat` | View communicated bosses | `boss chat --json` |
 
 ### Actions
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `boss greet <securityId>` | Greet a boss / apply | `boss greet abc123` |
+| `boss greet <securityId>` | Greet a boss / apply | `boss greet abc123 --json` |
 | `boss batch-greet <keyword>` | Batch greet from search | `boss batch-greet "Python" --city 杭州 -n 5` |
 | `boss batch-greet <keyword> --dry-run` | Preview without sending | `boss batch-greet "golang" --dry-run` |
 
@@ -88,8 +112,10 @@ boss login                              # QR code login — scan with Boss app
 
 | Command | Description |
 |---------|-------------|
-| `boss login` | QR code login (terminal QR output) |
-| `boss status` | Check authentication status |
+| `boss login` | Extract cookies from browser (auto-detect, fallback QR) |
+| `boss login --cookie-source <browser>` | Extract from specific browser |
+| `boss login --qrcode` | QR code login only (terminal QR output) |
+| `boss status` | Check authentication status (shows cookie names) |
 | `boss logout` | Clear saved credentials |
 
 ## Search Filter Options
@@ -112,15 +138,25 @@ boss batch-greet "golang" --city 杭州 --salary 20-30K --dry-run
 boss batch-greet "golang" --city 杭州 --salary 20-30K -n 10 -y
 ```
 
+### Search → Detail pipeline (structured)
+
+```bash
+# Search and extract securityId
+SEC_ID=$(boss search "golang" --city 杭州 --json | jq -r '.data.jobList[0].securityId')
+# Get full detail
+boss detail "$SEC_ID" --json | jq '.data.jobInfo | {jobName, salaryDesc, skills}'
+```
+
 ### Daily job check workflow
 
 ```bash
-boss recommend                         # Check recommendations
-boss search "Python" --city 杭州       # Search specific jobs
-boss show 1                            # View top result details
-boss applied                           # Check application status
-boss interviews                        # Check interview invitations
-boss chat                              # Check messages
+boss recommend --json | jq '.data.jobList | length'  # Check recommendations count
+boss search "Python" --city 杭州 --json               # Search specific jobs
+boss show 1                                            # View top result details
+boss applied --json                                    # Check application status
+boss interviews --json                                 # Check interview invitations
+boss chat --json                                       # Check messages
+boss history --json                                    # Review browsing history
 ```
 
 ### Export pipeline
@@ -133,8 +169,18 @@ boss export "Python" -n 100 --format json -o jobs.json
 ### Profile check
 
 ```bash
-boss me --json-output | jq '.name, .age, .degreeCategory'
+boss me --json | jq '.data | {name, age, degreeCategory}'
 ```
+
+## Error Codes
+
+Structured error codes returned in the `error.code` field (see [SCHEMA.md](./SCHEMA.md)):
+
+- `not_authenticated` — cookies expired or missing
+- `rate_limited` — too many requests (auto-cooldown built-in)
+- `invalid_params` — missing or invalid parameters
+- `api_error` — upstream API error
+- `unknown_error` — unexpected error
 
 ## Limitations
 
@@ -147,6 +193,7 @@ boss me --json-output | jq '.name, .age, .degreeCategory'
 ## Anti-Detection Notes for Agents
 
 - **Do NOT parallelize requests** — built-in Gaussian jitter delays exist for account safety
+- **Rate-limit auto-recovery**: if code=9 occurs, client auto-cools-down with increasing delays (10s→20s→40s→60s) and retries once
 - **Use `-v` flag for debugging**: `boss -v search "Python"` shows request timing
 - **Batch greet limit**: recommend ≤ 10 greetings per session to avoid detection
 - **Cookies auto-refresh**: if ≥ 7 days old, boss-cli auto-tries browser extraction
@@ -158,3 +205,4 @@ boss me --json-output | jq '.name, .age, .degreeCategory'
 - Prefer local browser cookie extraction over manual secret copy/paste.
 - If auth fails, ask the user to re-login via `boss login`.
 - Agent should treat cookie values as secrets (do not echo to stdout).
+- Built-in rate-limit delay protects accounts; do not bypass it.
