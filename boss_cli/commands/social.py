@@ -160,3 +160,4 @@ def batch_greet(keyword: str, city: str, count: int, salary: str | None, exp: st
 
     except BossApiError as exc:
         console.print(f"[red]❌ 搜索失败: {exc}[/red]")
+        raise SystemExit(1) from None

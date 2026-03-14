@@ -76,19 +76,19 @@ def logout() -> None:
 @structured_output_options
 def status(as_json: bool, as_yaml: bool) -> None:
     """查看当前登录状态"""
-    from ..auth import get_credential, verify_credential
+    from ..auth import get_credential, verify_credential_details
     cred = get_credential()
     if cred:
         cookie_names = sorted(cred.cookies.keys())
-        authenticated, message = verify_credential(cred)
+        health = verify_credential_details(cred)
+        authenticated = health["authenticated"]
+        message = health.get("reason")
         data = {
-            "authenticated": authenticated,
             "credential_present": True,
             "cookie_count": len(cred.cookies),
             "cookies": cookie_names,
+            **health,
         }
-        if not authenticated and message:
-            data["reason"] = message
         if as_json:
             click.echo(json.dumps(data, indent=2, ensure_ascii=False))
         elif as_yaml:
@@ -107,8 +107,14 @@ def status(as_json: bool, as_yaml: bool) -> None:
             else:
                 console.print(f"[yellow]⚠️  本地存在凭证，但登录态无效[/yellow] ({n} cookies)")
                 console.print(f"  [dim]{keys}{extra}[/dim]")
-                if message:
-                    console.print(f"  [dim]{message}[/dim]")
+            console.print(
+                "  [dim]"
+                f"search={'ok' if health['search_authenticated'] else 'fail'} · "
+                f"recommend={'ok' if health['recommend_authenticated'] else 'fail'}"
+                "[/dim]"
+            )
+            if message:
+                console.print(f"  [dim]{message}[/dim]")
     else:
         if as_json:
             click.echo(json.dumps({"authenticated": False, "credential_present": False}))

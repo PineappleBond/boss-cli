@@ -353,6 +353,7 @@ def export(
 
     except BossApiError as exc:
         console.print(f"[red]❌ 导出失败: {exc}[/red]")
+        raise SystemExit(1) from None
 
 
 # ── history ─────────────────────────────────────────────────────────

@@ -461,20 +461,54 @@ def get_credential() -> Credential | None:
     return None
 
 
-def verify_credential(credential: Credential) -> tuple[bool, str | None]:
-    """Verify that the credential can access an authenticated API."""
+def verify_credential_details(credential: Credential) -> dict[str, Any]:
+    """Verify credential health across the key authenticated flows."""
     if not credential.has_required_cookies:
         missing = ", ".join(credential.missing_required_cookies)
-        return False, f"缺少关键 Cookie: {missing}"
+        return {
+            "authenticated": False,
+            "search_authenticated": False,
+            "recommend_authenticated": False,
+            "reason": f"缺少关键 Cookie: {missing}",
+        }
 
     from .client import BossClient
     from .exceptions import BossApiError, SessionExpiredError
 
-    try:
-        with BossClient(credential, request_delay=0) as client:
+    checks = {
+        "search_authenticated": False,
+        "recommend_authenticated": False,
+    }
+    failures: list[str] = []
+
+    with BossClient(credential, request_delay=0.2) as client:
+        try:
             client.search_jobs(query="Python", city="100010000", page=1, page_size=1)
-        return True, None
-    except SessionExpiredError as exc:
-        return False, str(exc)
-    except BossApiError as exc:
-        return False, f"登录态校验失败: {exc}"
+            checks["search_authenticated"] = True
+        except SessionExpiredError as exc:
+            failures.append(f"search: {exc}")
+        except BossApiError as exc:
+            failures.append(f"search: 登录态校验失败: {exc}")
+
+        try:
+            client.get_recommend_jobs(page=1)
+            checks["recommend_authenticated"] = True
+        except SessionExpiredError as exc:
+            failures.append(f"recommend: {exc}")
+        except BossApiError as exc:
+            failures.append(f"recommend: 登录态校验失败: {exc}")
+
+    authenticated = checks["search_authenticated"]
+    result: dict[str, Any] = {
+        "authenticated": authenticated,
+        **checks,
+    }
+    if failures:
+        result["reason"] = "; ".join(failures)
+    return result
+
+
+def verify_credential(credential: Credential) -> tuple[bool, str | None]:
+    """Verify that the credential can access an authenticated API."""
+    result = verify_credential_details(credential)
+    return result["authenticated"], result.get("reason")

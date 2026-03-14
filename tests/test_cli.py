@@ -104,7 +104,11 @@ class TestAuthCommands:
         mock_cred = MagicMock()
         mock_cred.cookies = {"__zp_stoken__": "s", "wt2": "1", "wbg": "2", "zp_at": "3"}
         with patch("boss_cli.auth.get_credential", return_value=mock_cred), \
-             patch("boss_cli.auth.verify_credential", return_value=(True, None)):
+             patch("boss_cli.auth.verify_credential_details", return_value={
+                 "authenticated": True,
+                 "search_authenticated": True,
+                 "recommend_authenticated": True,
+             }):
             result = runner.invoke(cli, ["status"])
             assert result.exit_code == 0
             assert "已登录" in result.output
@@ -113,24 +117,52 @@ class TestAuthCommands:
         mock_cred = MagicMock()
         mock_cred.cookies = {"__zp_stoken__": "s", "wt2": "1", "wbg": "2", "zp_at": "3"}
         with patch("boss_cli.auth.get_credential", return_value=mock_cred), \
-             patch("boss_cli.auth.verify_credential", return_value=(True, None)):
+             patch("boss_cli.auth.verify_credential_details", return_value={
+                 "authenticated": True,
+                 "search_authenticated": True,
+                 "recommend_authenticated": True,
+             }):
             result = runner.invoke(cli, ["status", "--json"])
             assert result.exit_code == 0
             data = json.loads(result.output)
             assert data["authenticated"] is True
             assert data["credential_present"] is True
+            assert data["search_authenticated"] is True
+            assert data["recommend_authenticated"] is True
 
     def test_status_with_invalid_saved_auth(self):
         mock_cred = MagicMock()
         mock_cred.cookies = {"wt2": "1", "wbg": "2", "zp_at": "3"}
         with patch("boss_cli.auth.get_credential", return_value=mock_cred), \
-             patch("boss_cli.auth.verify_credential", return_value=(False, "缺少关键 Cookie: __zp_stoken__")):
+             patch("boss_cli.auth.verify_credential_details", return_value={
+                 "authenticated": False,
+                 "search_authenticated": False,
+                 "recommend_authenticated": False,
+                 "reason": "缺少关键 Cookie: __zp_stoken__",
+             }):
             result = runner.invoke(cli, ["status", "--json"])
             assert result.exit_code == 0
             data = json.loads(result.output)
             assert data["authenticated"] is False
             assert data["credential_present"] is True
             assert "__zp_stoken__" in data["reason"]
+
+    def test_status_with_partial_health(self):
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"__zp_stoken__": "s", "wt2": "1", "wbg": "2", "zp_at": "3"}
+        with patch("boss_cli.auth.get_credential", return_value=mock_cred), \
+             patch("boss_cli.auth.verify_credential_details", return_value={
+                 "authenticated": True,
+                 "search_authenticated": True,
+                 "recommend_authenticated": False,
+                 "reason": "recommend: 环境异常 (__zp_stoken__ 已过期)。请重新登录: boss logout && boss login",
+             }):
+            result = runner.invoke(cli, ["status", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["authenticated"] is True
+            assert data["search_authenticated"] is True
+            assert data["recommend_authenticated"] is False
 
     def test_me_without_auth(self):
         with patch("boss_cli.commands._common.get_credential", return_value=None):
@@ -704,7 +736,11 @@ class TestSchemaEnvelope:
         mock_cred = MagicMock()
         mock_cred.cookies = {"__zp_stoken__": "s", "wt2": "1", "wbg": "2", "zp_at": "3"}
         with patch("boss_cli.auth.get_credential", return_value=mock_cred), \
-             patch("boss_cli.auth.verify_credential", return_value=(True, None)):
+             patch("boss_cli.auth.verify_credential_details", return_value={
+                 "authenticated": True,
+                 "search_authenticated": True,
+                 "recommend_authenticated": True,
+             }):
             result = runner.invoke(cli, ["status", "--json"])
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -758,3 +794,33 @@ class TestCommandFailures:
             assert data["ok"] is False
             assert data["error"]["code"] == "not_authenticated"
             clear_credential.assert_called_once()
+
+    def test_export_failure_exits_nonzero(self):
+        from boss_cli.exceptions import BossApiError
+
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"__zp_stoken__": "s", "wt2": "1", "wbg": "2", "zp_at": "3"}
+
+        with patch("boss_cli.commands._common.get_credential", return_value=mock_cred), \
+             patch("boss_cli.commands.search.run_client_action", side_effect=BossApiError("boom")):
+            result = runner.invoke(cli, ["export", "Python"])
+            assert result.exit_code == 1
+            assert "导出失败" in result.output
+
+    def test_batch_greet_search_failure_exits_nonzero(self):
+        from boss_cli.exceptions import BossApiError
+
+        mock_cred = MagicMock()
+        mock_cred.cookies = {"__zp_stoken__": "s", "wt2": "1", "wbg": "2", "zp_at": "3"}
+
+        with patch("boss_cli.commands._common.get_credential", return_value=mock_cred), \
+             patch("boss_cli.commands.social.BossClient") as MockClient:
+            mock_instance = MagicMock()
+            mock_instance.search_jobs.side_effect = BossApiError("boom")
+            mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+            mock_instance.__exit__ = MagicMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            result = runner.invoke(cli, ["batch-greet", "Python", "--dry-run"])
+            assert result.exit_code == 1
+            assert "搜索失败" in result.output

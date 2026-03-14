@@ -141,6 +141,8 @@ boss-cli supports multiple authentication methods:
 
 `boss recommend` follows the live web app's current recommendation data source and request context, which improves compatibility when the legacy recommendation endpoint is rejected.
 
+`boss status --json` now reports per-flow health such as `search_authenticated` and `recommend_authenticated`, which helps diagnose partial-session issues.
+
 ### Cookie TTL & Auto-Refresh
 
 Saved cookies auto-refresh from browser after **7 days**. If browser refresh fails, falls back to stale cookies and logs a warning.
