@@ -1,33 +1,30 @@
 """Browser-assisted QR login via Camoufox.
 
-Opens a real browser window at the Boss Zhipin login page, renders
-the QR code in the terminal, and exports all cookies (including
-the JS-generated ``__zp_stoken__``) after the user scans and confirms.
+Hybrid approach:
+1. Complete the QR login flow via HTTP (httpx) to obtain session cookies
+   (wt2, wbg, zp_at).
+2. Inject those cookies into a Camoufox browser and navigate to the site
+   so that client-side JavaScript generates ``__zp_stoken__``.
+3. Export all cookies from the browser context.
+
+This gives us the complete cookie set that pure HTTP cannot achieve.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 import sys
 from typing import Any
 
-from .auth import Credential, save_credential
+from .auth import Credential, qr_login, save_credential
 from .constants import BASE_URL
 
 logger = logging.getLogger(__name__)
 
-LOGIN_URL = f"{BASE_URL}/web/user/"
-
-# API endpoints intercepted from the browser
-QR_RANDKEY_ENDPOINT = "/wapi/zppassport/captcha/randkey"
-QR_SCAN_ENDPOINT = "/wapi/zppassport/qrcode/scan"
-QR_SCAN_LOGIN_ENDPOINT = "/wapi/zppassport/qrcode/scanLogin"
-
-# Cookie names to export from browser
+# Cookie domains to export from browser
 BROWSER_EXPORT_DOMAINS = (".zhipin.com", "zhipin.com", "www.zhipin.com")
-
-POLL_TIMEOUT_S = 240  # 4 minutes
 
 
 class BrowserLoginUnavailable(RuntimeError):
@@ -77,27 +74,59 @@ def _normalize_browser_cookies(raw_cookies: list[dict[str, Any]]) -> dict[str, s
     return cookies
 
 
+def _hydrate_stoken_via_browser(cookies: dict[str, str]) -> dict[str, str]:
+    """Inject session cookies into a Camoufox browser and harvest __zp_stoken__.
+
+    Boss Zhipin's client-side JS generates __zp_stoken__ on page load.
+    We open a headless browser with the session cookies already set, visit
+    the site, and let JS run naturally.
+    """
+    from camoufox.sync_api import Camoufox
+
+    playwright_cookies = []
+    for name, value in cookies.items():
+        playwright_cookies.append({
+            "name": name,
+            "value": value,
+            "domain": ".zhipin.com",
+            "path": "/",
+        })
+
+    with Camoufox(headless=True) as browser:
+        context = browser.new_context()
+        context.add_cookies(playwright_cookies)
+        page = context.new_page()
+
+        try:
+            page.goto(f"{BASE_URL}/", wait_until="networkidle", timeout=20_000)
+        except Exception:
+            # networkidle may timeout, but cookies may still be set
+            logger.debug("Camoufox page load did not reach networkidle")
+
+        # Give JS a moment to set cookies
+        try:
+            page.wait_for_timeout(3000)
+        except Exception:
+            pass
+
+        # Export all cookies
+        result = _normalize_browser_cookies(context.cookies())
+
+    return result
+
+
 def browser_qr_login(
     *,
     on_status: callable | None = None,
-    timeout_s: int = POLL_TIMEOUT_S,
 ) -> Credential:
-    """Log in by letting a real browser complete the QR flow, then export cookies.
+    """Hybrid QR login: HTTP for session + Camoufox for __zp_stoken__.
 
-    1. Open the Boss Zhipin login page in Camoufox (visible browser window)
-    2. Intercept the QR randkey API to get qrId
-    3. Render QR in terminal for user to scan
-    4. Wait for scan confirmation
-    5. Export all cookies from the browser context
+    1. Run the standard HTTP QR login flow (user scans in terminal)
+    2. If __zp_stoken__ is missing, use a headless Camoufox browser
+       with the session cookies to let JS generate it
+    3. Return the complete credential
     """
     _ensure_camoufox_ready()
-
-    try:
-        from camoufox.sync_api import Camoufox
-    except ImportError as exc:
-        raise BrowserLoginUnavailable(
-            "Camoufox sync API is unavailable in the current environment."
-        ) from exc
 
     def _emit(msg: str) -> None:
         if on_status:
@@ -105,92 +134,29 @@ def browser_qr_login(
         else:
             print(msg)
 
-    _emit("🔑 正在启动浏览器辅助登录...")
+    # Step 1: Complete QR login via HTTP (reuse existing flow)
+    cred = asyncio.run(qr_login())
 
-    with Camoufox(headless=False) as browser:
-        page = browser.new_page()
+    # Step 2: If __zp_stoken__ is missing, hydrate via browser
+    if "__zp_stoken__" not in cred.cookies:
+        _emit("\n🔧 正在通过浏览器补全 __zp_stoken__...")
 
-        state: dict[str, Any] = {"scanned": False, "confirmed": False, "qr_id": ""}
-
-        def _handle_response(response: Any) -> None:
-            """Monitor scan/scanLogin API responses from the browser."""
-            url = response.url
-            try:
-                if QR_SCAN_ENDPOINT in url and "scanLogin" not in url:
-                    data = response.json()
-                    if data.get("scaned") or data.get("newScaned"):
-                        if not state["scanned"]:
-                            state["scanned"] = True
-                            _emit("  📲 已扫码，请在手机上确认...")
-                elif QR_SCAN_LOGIN_ENDPOINT in url:
-                    data = response.json()
-                    if data.get("login") is True:
-                        state["confirmed"] = True
-                        _emit("  ✅ 扫码确认成功！")
-            except Exception as exc:
-                logger.debug("Failed to parse browser response from %s: %s", url, exc)
-
-        page.on("response", _handle_response)
-
-        # Navigate and intercept the randkey API to get qrId
         try:
-            with page.expect_response(
-                lambda resp: QR_RANDKEY_ENDPOINT in resp.url and resp.request.method == "POST",
-                timeout=20_000,
-            ) as randkey_info:
-                page.goto(LOGIN_URL, wait_until="domcontentloaded")
+            enriched = _hydrate_stoken_via_browser(cred.cookies)
         except Exception as exc:
-            raise RuntimeError("无法加载 Boss 直聘登录页面") from exc
+            logger.warning("Browser __zp_stoken__ hydration failed: %s", exc)
+            _emit("[yellow]⚠️  浏览器补全 __zp_stoken__ 失败，部分接口可能不可用[/yellow]")
+            return cred
 
-        try:
-            randkey_data = randkey_info.value.json()
-        except Exception as exc:
-            raise RuntimeError("无法解析 QR session 响应") from exc
+        if "__zp_stoken__" in enriched:
+            # Merge: keep all original cookies, add browser-enriched ones
+            merged = {**cred.cookies, **enriched}
+            cred = Credential(cookies=merged)
+            save_credential(cred)
+            _emit("✅ __zp_stoken__ 补全成功！")
+        else:
+            _emit("⚠️  浏览器未能生成 __zp_stoken__，部分接口可能返回「环境异常」")
+    else:
+        _emit("✅ 已获取完整 cookies（含 __zp_stoken__）")
 
-        qr_id = randkey_data.get("zpData", {}).get("qrId", "")
-        if not qr_id:
-            raise RuntimeError(f"QR session 未返回 qrId: {randkey_data}")
-
-        state["qr_id"] = qr_id
-
-        # Display QR in terminal (best-effort) + tell user about browser window
-        _emit("\n📱 请使用 Boss 直聘 APP 扫描二维码登录:\n")
-        try:
-            from .auth import _display_qr_in_terminal
-            _display_qr_in_terminal(qr_id)
-        except Exception:
-            pass
-        _emit(f"\n⏳ 扫码后请在手机上确认登录... (QR ID: {qr_id[:20]}...)")
-        _emit("  💡 也可以直接在浏览器窗口中扫描二维码\n")
-
-        # Wait for browser to navigate away from login page (means login done)
-        try:
-            page.wait_for_url(
-                lambda url: "/web/user" not in url,
-                timeout=timeout_s * 1000,
-            )
-        except Exception:
-            # Timeout or navigation didn't happen, check if cookies were set anyway
-            logger.debug("Browser did not navigate away from login page before timeout")
-
-        # Give the page a moment to settle (JS sets cookies)
-        try:
-            page.wait_for_timeout(2000)
-        except Exception:
-            pass
-
-        # Export cookies
-        cookies = _normalize_browser_cookies(page.context.cookies())
-
-    if not cookies:
-        raise RuntimeError("浏览器登录后未获取到任何 Cookie")
-
-    credential = Credential(cookies=cookies)
-
-    missing = credential.missing_required_cookies
-    if missing:
-        logger.warning("Browser login missing cookies: %s", ", ".join(missing))
-
-    # Save and return
-    save_credential(credential)
-    return credential
+    return cred
