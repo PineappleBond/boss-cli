@@ -877,7 +877,7 @@ class TestCommandFailures:
 
         with patch("boss_cli.commands._common.get_credential", return_value=mock_cred), \
              patch("boss_cli.commands._common.BossClient") as MockClient, \
-             patch("boss_cli.auth.extract_browser_credential", return_value=None), \
+             patch("boss_cli.auth.extract_browser_credential", return_value=(None, [])), \
              patch("boss_cli.auth.clear_credential") as clear_credential:
             mock_instance = MagicMock()
             mock_instance.search_jobs.side_effect = SessionExpiredError()
@@ -945,7 +945,7 @@ class TestCommandFailures:
 
         with patch("boss_cli.commands._common.get_credential", return_value=mock_cred), \
              patch("boss_cli.commands._common.BossClient", side_effect=[initial_client, initial_client, refreshed_client]), \
-             patch("boss_cli.auth.extract_browser_credential", return_value=fresh_cred), \
+             patch("boss_cli.auth.extract_browser_credential", return_value=(fresh_cred, [])), \
              patch("boss_cli.auth.clear_credential") as clear_credential:
             result = runner.invoke(cli, ["batch-greet", "Python", "-n", "1", "-y"])
             assert result.exit_code == 0

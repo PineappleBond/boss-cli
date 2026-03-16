@@ -83,14 +83,23 @@ def login(qrcode: bool, cookie_source: str | None) -> None:
             raise SystemExit(1) from None
         _finalize_login(cred, from_qr=True)
     else:
-        from ..auth import extract_browser_credential
+        from ..auth import extract_browser_credential, _diagnose_extraction_issues
         # Try browser cookies first
-        cred = extract_browser_credential(cookie_source=cookie_source)
+        cred, diagnostics = extract_browser_credential(cookie_source=cookie_source)
         if cred:
             _finalize_login(cred)
         else:
+            # Show diagnostics hint if available
+            hint = _diagnose_extraction_issues(diagnostics)
+            if hint:
+                console.print(f"[yellow]⚠️  Cookie 提取诊断:[/yellow]")
+                for line in hint.splitlines():
+                    console.print(f"  [dim]{line}[/dim]")
+                console.print()
+
             # Fallback to QR login
             console.print("[yellow]未找到浏览器 Cookie，尝试二维码登录...[/yellow]")
+            console.print("[dim]💡 也可以手动设置 BOSS_COOKIES 环境变量来注入 cookie[/dim]")
             try:
                 from ..browser_login import browser_qr_login, BrowserLoginUnavailable
                 try:

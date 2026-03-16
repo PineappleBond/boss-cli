@@ -8,6 +8,7 @@ Strategy:
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import logging
@@ -123,7 +124,7 @@ def load_credential() -> Credential | None:
                 "Credential older than %d days, attempting browser refresh",
                 CREDENTIAL_TTL_DAYS,
             )
-            fresh = extract_browser_credential()
+            fresh, _ = extract_browser_credential()
             if fresh:
                 logger.info("Auto-refreshed credential from browser")
                 return fresh
@@ -145,17 +146,257 @@ def clear_credential() -> None:
     _AUTH_HEALTH_CACHE.clear()
 
 
+# ── Keychain / environment diagnostics ──────────────────────────────
+
+_KEYCHAIN_ERROR_KEYWORDS = (
+    "key for cookie decryption",
+    "safe storage",
+    "keychain",
+    "secretstorage",
+    "dpapi",
+    "cryptunprotectdata",
+    "win32crypt",
+)
+
+
+def _diagnose_extraction_issues(diagnostics: list[str]) -> str | None:
+    """Analyse extraction diagnostics for platform-specific issues.
+
+    Returns a user-friendly hint string, or None.
+    """
+    lowered = " ".join(diagnostics).lower()
+    if not any(kw in lowered for kw in _KEYCHAIN_ERROR_KEYWORDS):
+        return None
+
+    is_ssh = bool(os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION"))
+
+    if sys.platform == "darwin":
+        if is_ssh:
+            return (
+                "macOS Keychain is locked (SSH session detected).\n"
+                "  Fix: security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
+                "  Then retry the command."
+            )
+        return (
+            "macOS Keychain permission denied — your terminal is not authorized to read browser cookie encryption keys.\n"
+            "  Fix: Open Keychain Access → search for \"<Browser> Safe Storage\" → Access Control → add your Terminal app.\n"
+            "  Or click \"Always Allow\" when the Keychain authorization popup appears."
+        )
+    if sys.platform == "win32":
+        return (
+            "Windows DPAPI cookie decryption failed.\n"
+            "  Possible causes:\n"
+            "  1. Chrome is running (locks the cookie database). Try closing Chrome first.\n"
+            "  2. browser_cookie3 may not support the latest Chrome cookie encryption format.\n"
+            "  3. If Chrome was running, admin privileges may be required for VSS shadowcopy.\n"
+            "  Workaround: Set BOSS_COOKIES environment variable manually (see boss login --help)."
+        )
+    # Linux: gnome-keyring / SecretStorage issues
+    return (
+        "System keyring access failed — the cookie encryption key could not be retrieved.\n"
+        "  If running headless or via SSH, ensure your keyring daemon is unlocked."
+    )
+
+
+# ── Environment variable fallback ───────────────────────────────────
+
+def load_from_env() -> Credential | None:
+    """Load cookies from BOSS_COOKIES environment variable.
+
+    Format: "key1=val1; key2=val2; ..."
+    """
+    raw = os.environ.get("BOSS_COOKIES", "").strip()
+    if not raw:
+        return None
+    cookies: dict[str, str] = {}
+    for part in raw.split(";"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if k and v:
+            cookies[k] = v
+    if not cookies:
+        logger.debug("BOSS_COOKIES env set but no valid key=value pairs found")
+        return None
+    cred = Credential(cookies=cookies)
+    logger.info("Loaded %d cookies from BOSS_COOKIES environment variable", len(cookies))
+    return cred
+
+
 # ── Browser cookie extraction ───────────────────────────────────────
 
-def extract_browser_credential(cookie_source: str | None = None) -> Credential | None:
-    """Extract Boss Zhipin cookies from local browsers via browser-cookie3.
+# Chromium-based browser base directories
+_CHROMIUM_BASE_DIRS: dict[str, str] = {
+    "chrome": os.path.join("Google", "Chrome"),
+    "edge": "Microsoft Edge",
+    "brave": os.path.join("BraveSoftware", "Brave-Browser"),
+}
 
-    Args:
-        cookie_source: Optional browser name to extract from (e.g., 'chrome', 'arc').
-                       If None, tries all supported browsers in order.
+# Default browser order for extraction
+_DEFAULT_BROWSER_ORDER = ["chrome", "edge", "firefox", "brave"]
+
+# Optional browsers (added if browser_cookie3 supports them)
+_OPTIONAL_BROWSERS = [("Arc", "arc"), ("Chromium", "chromium"), ("Vivaldi", "vivaldi"), ("Opera", "opera")]
+
+
+def _get_browser_order(cookie_source: str | None = None) -> list[str]:
+    """Return browser extraction order, optionally prioritizing a specific browser."""
+    if cookie_source:
+        target = cookie_source.lower()
+        return [target] + [b for b in _DEFAULT_BROWSER_ORDER if b != target]
+    return _DEFAULT_BROWSER_ORDER
+
+
+def _iter_chrome_cookie_files(browser_name: str) -> list[str]:
+    """Return cookie file paths for all Chrome profiles."""
+    base_dir = _CHROMIUM_BASE_DIRS.get(browser_name)
+    if base_dir is None:
+        return []
+
+    if sys.platform == "darwin":
+        root = os.path.join(os.path.expanduser("~"), "Library", "Application Support", base_dir)
+    elif sys.platform == "win32":
+        if browser_name == "edge":
+            root = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data")
+        else:
+            root = os.path.join(os.environ.get("LOCALAPPDATA", ""), base_dir)
+    else:
+        if browser_name == "edge":
+            root = os.path.join(os.path.expanduser("~"), ".config", "microsoft-edge")
+        else:
+            root = os.path.join(os.path.expanduser("~"), ".config", base_dir)
+
+    if not os.path.isdir(root):
+        return []
+
+    paths: list[str] = []
+    default_cookies = os.path.join(root, "Default", "Cookies")
+    if os.path.exists(default_cookies):
+        paths.append(default_cookies)
+
+    profile_dirs = sorted(glob.glob(os.path.join(root, "Profile *")))
+    for profile_dir in profile_dirs:
+        cookie_file = os.path.join(profile_dir, "Cookies")
+        if os.path.exists(cookie_file):
+            paths.append(cookie_file)
+
+    return paths
+
+
+def _extract_cookies_from_jar(jar: Any, source: str = "unknown") -> dict[str, str] | None:
+    """Extract zhipin.com cookies from a browser_cookie3 cookie jar."""
+    cookies: dict[str, str] = {}
+    for cookie in jar:
+        domain = cookie.domain or ""
+        if "zhipin.com" in domain:
+            if cookie.name and cookie.value:
+                cookies[cookie.name] = cookie.value
+    if cookies:
+        logger.debug("Found %d zhipin cookies from %s", len(cookies), source)
+        return cookies
+    return None
+
+
+def _extract_in_process(cookie_source: str | None = None) -> tuple[Credential | None, list[str]]:
+    """Extract cookies in the main process.
+
+    On macOS, Chrome encrypts cookies using a key stored in the system Keychain.
+    Child processes do NOT inherit the parent's Keychain authorization, so
+    browser_cookie3 must run in the main process to decrypt cookies.
+
+    Returns (Credential | None, diagnostics_list).
+    """
+    try:
+        import browser_cookie3 as bc3
+    except ImportError:
+        logger.debug("browser_cookie3 not installed, skipping in-process extraction")
+        return None, ["browser-cookie3 not installed"]
+
+    browser_fns: dict[str, Any] = {
+        "chrome": bc3.chrome,
+        "firefox": bc3.firefox,
+        "edge": bc3.edge,
+        "brave": bc3.brave,
+    }
+    # Add optional browsers if supported
+    for display_name, attr in _OPTIONAL_BROWSERS:
+        fn = getattr(bc3, attr, None)
+        if fn:
+            browser_fns[attr] = fn
+
+    diagnostics: list[str] = []
+    attempts: list[str] = []
+
+    for name in _get_browser_order(cookie_source):
+        fn = browser_fns.get(name)
+        if fn is None:
+            continue
+
+        if name in _CHROMIUM_BASE_DIRS:
+            # Chromium-based: iterate all profiles
+            cookie_files = _iter_chrome_cookie_files(name)
+            if not cookie_files:
+                # No profile dirs found — try the default (no cookie_file arg)
+                try:
+                    jar = fn(domain_name=".zhipin.com")
+                except Exception as e:
+                    logger.debug("%s in-process extraction failed: %s", name, e)
+                    attempts.append(f"{name}={type(e).__name__}")
+                    diagnostics.append(f"{name}: {e}")
+                    continue
+                cookies = _extract_cookies_from_jar(jar, source=f"{name}(in-process)")
+                if cookies:
+                    cred = Credential(cookies=cookies)
+                    logger.info("Found cookies in %s (in-process, default)", name)
+                    return cred, diagnostics
+                attempts.append(f"{name}=no-cookies")
+                continue
+
+            for cookie_file in cookie_files:
+                profile_name = os.path.basename(os.path.dirname(cookie_file))
+                try:
+                    jar = fn(cookie_file=cookie_file, domain_name=".zhipin.com")
+                except Exception as e:
+                    logger.debug("%s[%s] in-process extraction failed: %s", name, profile_name, e)
+                    attempts.append(f"{name}[{profile_name}]={type(e).__name__}")
+                    diagnostics.append(f"{name}[{profile_name}]: {e}")
+                    continue
+                cookies = _extract_cookies_from_jar(jar, source=f"{name}[{profile_name}](in-process)")
+                if cookies:
+                    cred = Credential(cookies=cookies)
+                    logger.info("Found cookies in %s profile '%s' (in-process)", name, profile_name)
+                    return cred, diagnostics
+                attempts.append(f"{name}[{profile_name}]=no-cookies")
+        else:
+            # Non-Chromium (Firefox): use default behavior
+            try:
+                jar = fn(domain_name=".zhipin.com")
+            except Exception as e:
+                logger.debug("%s in-process extraction failed: %s", name, e)
+                attempts.append(f"{name}={type(e).__name__}")
+                diagnostics.append(f"{name}: {e}")
+                continue
+            cookies = _extract_cookies_from_jar(jar, source=f"{name}(in-process)")
+            if cookies:
+                cred = Credential(cookies=cookies)
+                logger.info("Found cookies in %s (in-process)", name)
+                return cred, diagnostics
+            attempts.append(f"{name}=no-cookies")
+
+    if attempts:
+        logger.debug("In-process extraction attempts: %s", ", ".join(attempts))
+    return None, diagnostics
+
+
+def _extract_via_subprocess(cookie_source: str | None = None) -> tuple[Credential | None, list[str]]:
+    """Extract cookies via subprocess (fallback if in-process fails, e.g. SQLite lock).
+
+    Returns (Credential | None, diagnostics_list).
     """
     extract_script = '''
-import json, sys
+import glob, json, os, sys
 try:
     import browser_cookie3 as bc3
 except ImportError:
@@ -164,18 +405,47 @@ except ImportError:
 
 target = sys.argv[1] if len(sys.argv) > 1 else None
 
-browsers = [
-    ("Chrome", bc3.chrome),
-    ("Firefox", bc3.firefox),
-    ("Edge", bc3.edge),
-    ("Brave", bc3.brave),
-    ("Chromium", bc3.chromium),
-    ("Opera", bc3.opera),
-    ("Vivaldi", bc3.vivaldi),
-]
+CHROMIUM_BASE_DIRS = {
+    "chrome": os.path.join("Google", "Chrome"),
+    "edge": "Microsoft Edge",
+    "brave": os.path.join("BraveSoftware", "Brave-Browser"),
+}
 
-# Try adding optional browsers (not all browser_cookie3 versions support these)
-for name, attr in [("Arc", "arc"), ("Safari", "safari"), ("LibreWolf", "librewolf")]:
+def iter_cookie_files(browser_name):
+    base_dir = CHROMIUM_BASE_DIRS.get(browser_name)
+    if base_dir is None:
+        return []
+    if sys.platform == "darwin":
+        root = os.path.join(os.path.expanduser("~"), "Library", "Application Support", base_dir)
+    elif sys.platform == "win32":
+        if browser_name == "edge":
+            root = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data")
+        else:
+            root = os.path.join(os.environ.get("LOCALAPPDATA", ""), base_dir)
+    else:
+        if browser_name == "edge":
+            root = os.path.join(os.path.expanduser("~"), ".config", "microsoft-edge")
+        else:
+            root = os.path.join(os.path.expanduser("~"), ".config", base_dir)
+    if not os.path.isdir(root):
+        return []
+    paths = []
+    d = os.path.join(root, "Default", "Cookies")
+    if os.path.exists(d):
+        paths.append(d)
+    for pd in sorted(glob.glob(os.path.join(root, "Profile *"))):
+        cf = os.path.join(pd, "Cookies")
+        if os.path.exists(cf):
+            paths.append(cf)
+    return paths
+
+browsers = [
+    ("chrome", bc3.chrome),
+    ("firefox", bc3.firefox),
+    ("edge", bc3.edge),
+    ("brave", bc3.brave),
+]
+for name, attr in [("arc", "arc"), ("chromium", "chromium"), ("vivaldi", "vivaldi"), ("opera", "opera")]:
     fn = getattr(bc3, attr, None)
     if fn:
         browsers.append((name, fn))
@@ -187,19 +457,47 @@ if target:
         print(json.dumps({"error": f"unsupported_browser: {target}"}))
         sys.exit(0)
 
+attempts = []
 for name, loader in browsers:
-    try:
-        cj = loader(domain_name=".zhipin.com")
-        cookies = {c.name: c.value for c in cj if "zhipin.com" in (c.domain or "")}
-        if cookies:
-            print(json.dumps({"browser": name, "cookies": cookies}))
-            sys.exit(0)
-    except Exception:
-        pass
+    if name in CHROMIUM_BASE_DIRS:
+        cookie_files = iter_cookie_files(name)
+        if not cookie_files:
+            try:
+                cj = loader(domain_name=".zhipin.com")
+                cookies = {c.name: c.value for c in cj if "zhipin.com" in (c.domain or "")}
+                if cookies:
+                    print(json.dumps({"browser": name, "cookies": cookies}))
+                    sys.exit(0)
+                attempts.append(f"{name}=no-cookies")
+            except Exception as exc:
+                attempts.append(f"{name}={type(exc).__name__}: {exc}")
+            continue
+        for cf in cookie_files:
+            pname = os.path.basename(os.path.dirname(cf))
+            try:
+                cj = loader(cookie_file=cf, domain_name=".zhipin.com")
+                cookies = {c.name: c.value for c in cj if "zhipin.com" in (c.domain or "")}
+                if cookies:
+                    print(json.dumps({"browser": name, "cookies": cookies}))
+                    sys.exit(0)
+                attempts.append(f"{name}[{pname}]=no-cookies")
+            except Exception as exc:
+                attempts.append(f"{name}[{pname}]={type(exc).__name__}: {exc}")
+    else:
+        try:
+            cj = loader(domain_name=".zhipin.com")
+            cookies = {c.name: c.value for c in cj if "zhipin.com" in (c.domain or "")}
+            if cookies:
+                print(json.dumps({"browser": name, "cookies": cookies}))
+                sys.exit(0)
+            attempts.append(f"{name}=no-cookies")
+        except Exception as exc:
+            attempts.append(f"{name}={type(exc).__name__}: {exc}")
 
-print(json.dumps({"error": "no_cookies"}))
+print(json.dumps({"error": "no_cookies", "attempts": attempts}))
 '''
 
+    diagnostics: list[str] = []
     try:
         cmd = [sys.executable, "-c", extract_script]
         if cookie_source:
@@ -214,40 +512,85 @@ print(json.dumps({"error": "no_cookies"}))
 
         if result.returncode != 0:
             logger.debug("Cookie extraction subprocess failed: %s", result.stderr)
-            return None
+            return None, diagnostics
 
         output = result.stdout.strip()
         if not output:
-            return None
+            return None, diagnostics
 
         data = json.loads(output)
         if "error" in data:
+            attempts = data.get("attempts") or []
+            if attempts:
+                logger.debug("Subprocess extraction attempts: %s", ", ".join(str(a) for a in attempts))
+                diagnostics.extend(str(a) for a in attempts)
             if data["error"] == "not_installed":
                 logger.debug("browser-cookie3 not installed, skipping")
             else:
                 logger.debug("No valid Boss Zhipin cookies found: %s", data["error"])
-            return None
+            return None, diagnostics
 
         cookies = data["cookies"]
         browser_name = data["browser"]
         cred = Credential(cookies=cookies)
-        if not cred.has_required_cookies:
-            logger.warning(
-                "Ignoring %s cookies missing required keys: %s",
-                browser_name,
-                ", ".join(cred.missing_required_cookies),
-            )
-            return None
-        logger.info("Found cookies in %s (%d cookies)", browser_name, len(cookies))
-        save_credential(cred)
-        return cred
+        logger.info("Found cookies in %s (subprocess, %d cookies)", browser_name, len(cookies))
+        return cred, diagnostics
 
     except subprocess.TimeoutExpired:
         logger.warning("Cookie extraction timed out (browser may be running)")
-        return None
+        diagnostics.append("subprocess: timed out")
+        return None, diagnostics
     except (json.JSONDecodeError, KeyError) as e:
         logger.warning("Cookie extraction parse error: %s", e)
-        return None
+        return None, diagnostics
+
+
+def extract_browser_credential(cookie_source: str | None = None) -> tuple[Credential | None, list[str]]:
+    """Extract Boss Zhipin cookies from local browsers.
+
+    Strategy:
+    1. Try in-process first (required on macOS for Keychain access)
+    2. Fall back to subprocess (handles SQLite lock when browser is running)
+
+    Args:
+        cookie_source: Optional browser name to extract from (e.g., 'chrome', 'firefox').
+                       If None, tries all supported browsers in order.
+
+    Returns:
+        (Credential | None, diagnostics_list)
+    """
+    all_diagnostics: list[str] = []
+
+    # 1. In-process (works on macOS, may fail with SQLite lock)
+    cred, diag = _extract_in_process(cookie_source)
+    all_diagnostics.extend(diag)
+    if cred:
+        if not cred.has_required_cookies:
+            logger.warning(
+                "In-process cookies missing required keys: %s",
+                ", ".join(cred.missing_required_cookies),
+            )
+        else:
+            save_credential(cred)
+            return cred, all_diagnostics
+
+    # 2. Subprocess fallback (handles SQLite lock, but fails on macOS Keychain)
+    logger.debug("In-process extraction failed, trying subprocess fallback")
+    cred, diag = _extract_via_subprocess(cookie_source)
+    all_diagnostics.extend(diag)
+    if cred:
+        if not cred.has_required_cookies:
+            logger.warning(
+                "Subprocess cookies missing required keys: %s",
+                ", ".join(cred.missing_required_cookies),
+            )
+        else:
+            save_credential(cred)
+            return cred, all_diagnostics
+
+    if not cred:
+        logger.warning("Cookie extraction failed in both in-process and subprocess modes")
+    return None, all_diagnostics
 
 
 # ── QR Code terminal rendering ──────────────────────────────────────
@@ -531,14 +874,21 @@ def get_credential() -> Credential | None:
     """Try all auth methods and return credential.
 
     1. Saved credential file
-    2. Browser cookie extraction
+    2. Environment variable (BOSS_COOKIES)
+    3. Browser cookie extraction
     """
     cred = load_credential()
     if cred:
         logger.info("Loaded credential from %s", CREDENTIAL_FILE)
         return cred
 
-    cred = extract_browser_credential()
+    cred = load_from_env()
+    if cred:
+        logger.info("Loaded credential from BOSS_COOKIES env")
+        save_credential(cred)
+        return cred
+
+    cred, _ = extract_browser_credential()
     if cred:
         logger.info("Extracted credential from browser")
         return cred
