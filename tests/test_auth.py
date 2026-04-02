@@ -177,6 +177,56 @@ class TestBrowserOrder:
         assert "chrome" in order
 
 
+class TestChromeCookieFileDiscovery:
+    """Test Chrome profile cookie file discovery."""
+
+    def test_linux_chrome_uses_google_chrome_path(self, tmp_path, monkeypatch):
+        from boss_cli.auth import _iter_chrome_cookie_files
+
+        home = tmp_path / "home"
+        default = home / ".config" / "google-chrome" / "Default"
+        profile1 = home / ".config" / "google-chrome" / "Profile 1"
+        default.mkdir(parents=True)
+        profile1.mkdir(parents=True)
+        (default / "Cookies").write_text("", encoding="utf-8")
+        (profile1 / "Cookies").write_text("", encoding="utf-8")
+
+        monkeypatch.setattr("boss_cli.auth.sys.platform", "linux")
+        monkeypatch.setattr(
+            "boss_cli.auth.os.path.expanduser",
+            lambda p: p.replace("~", str(home)),
+        )
+
+        paths = _iter_chrome_cookie_files("chrome")
+
+        assert str(default / "Cookies") in paths
+        assert str(profile1 / "Cookies") in paths
+
+    def test_chrome_prefers_newer_profile_cookie_files(self, tmp_path, monkeypatch):
+        from boss_cli.auth import _iter_chrome_cookie_files
+
+        home = tmp_path / "home"
+        default = home / ".config" / "google-chrome" / "Default"
+        profile1 = home / ".config" / "google-chrome" / "Profile 1"
+        default.mkdir(parents=True)
+        profile1.mkdir(parents=True)
+        default_cookie = default / "Cookies"
+        profile1_cookie = profile1 / "Cookies"
+        default_cookie.write_text("", encoding="utf-8")
+        profile1_cookie.write_text("", encoding="utf-8")
+
+        monkeypatch.setattr("boss_cli.auth.sys.platform", "linux")
+        monkeypatch.setattr(
+            "boss_cli.auth.os.path.expanduser",
+            lambda p: p.replace("~", str(home)),
+        )
+        monkeypatch.setattr("boss_cli.auth.os.path.getmtime", lambda p: 1 if "Default" in p else 2)
+
+        paths = _iter_chrome_cookie_files("chrome")
+
+        assert paths == [str(profile1_cookie), str(default_cookie)]
+
+
 # ── In-process extraction ───────────────────────────────────────────
 
 
