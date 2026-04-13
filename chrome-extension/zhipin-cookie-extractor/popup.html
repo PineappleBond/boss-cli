@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      width: 420px;
+      padding: 15px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+    }
+    h2 {
+      color: #00c853;
+      margin: 0 0 15px 0;
+      font-size: 18px;
+    }
+    .status {
+      padding: 10px;
+      border-radius: 8px;
+      margin-bottom: 15px;
+    }
+    .status.success {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+    .status.error {
+      background: #ffebee;
+      color: #c62828;
+    }
+    .status.info {
+      background: #e3f2fd;
+      color: #1565c0;
+    }
+    .auto-refresh {
+      background: #f3e5f5;
+      padding: 10px;
+      border-radius: 8px;
+      margin-bottom: 15px;
+    }
+    .auto-refresh-title {
+      font-weight: bold;
+      color: #7b1fa2;
+      margin-bottom: 5px;
+    }
+    .auto-refresh-status {
+      color: #666;
+      font-size: 13px;
+    }
+    .cookie-list {
+      max-height: 180px;
+      overflow-y: auto;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 15px;
+      background: #fafafa;
+    }
+    .cookie-item {
+      padding: 5px 0;
+      border-bottom: 1px solid #eee;
+    }
+    .cookie-item:last-child {
+      border-bottom: none;
+    }
+    .cookie-name {
+      font-weight: bold;
+      color: #1565c0;
+    }
+    .cookie-value {
+      color: #666;
+      font-size: 12px;
+      word-break: break-all;
+    }
+    .btn-group {
+      display: flex;
+      gap: 10px;
+    }
+    button {
+      flex: 1;
+      padding: 10px 15px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .btn-primary {
+      background: #00c853;
+      color: white;
+    }
+    .btn-primary:hover {
+      background: #00a844;
+    }
+    .btn-secondary {
+      background: #1976d2;
+      color: white;
+    }
+    .btn-secondary:hover {
+      background: #1565c0;
+    }
+    .btn-warning {
+      background: #ff9800;
+      color: white;
+    }
+    .btn-warning:hover {
+      background: #f57c00;
+    }
+    .btn-purple {
+      background: #7b1fa2;
+      color: white;
+    }
+    .btn-purple:hover {
+      background: #6a1b9a;
+    }
+    .footer {
+      margin-top: 15px;
+      padding-top: 10px;
+      border-top: 1px solid #eee;
+      color: #999;
+      font-size: 12px;
+      text-align: center;
+    }
+    .highlight {
+      background: #fff3e0;
+      padding: 2px 5px;
+      border-radius: 3px;
+    }
+    .interval-control {
+      display: flex;
+      gap: 5px;
+      margin-top: 10px;
+    }
+    .interval-control select {
+      padding: 5px 10px;
+      border-radius: 5px;
+      border: 1px solid #ccc;
+    }
+  </style>
+</head>
+<body>
+  <h2>🤝 Boss直聘 Cookie 提取器</h2>
+  
+  <div id="status" class="status info">正在检测...</div>
+  
+  <!-- 自动刷新状态 -->
+  <div class="auto-refresh">
+    <div class="auto-refresh-title">🔄 自动刷新</div>
+    <div class="auto-refresh-status" id="auto-refresh-status">加载中...</div>
+    <div class="interval-control">
+      <span>刷新间隔:</span>
+      <select id="interval-select">
+        <option value="1">1 分钟</option>
+        <option value="3">3 分钟</option>
+        <option value="5" selected>5 分钟</option>
+        <option value="10">10 分钟</option>
+        <option value="30">30 分钟</option>
+      </select>
+      <button class="btn-purple" id="refresh-now-btn" style="flex: 0; padding: 5px 15px;">立即刷新</button>
+    </div>
+  </div>
+  
+  <div id="cookie-section" style="display: none;">
+    <div class="cookie-list" id="cookie-list"></div>
+    <div class="btn-group">
+      <button class="btn-primary" id="copy-btn">📋 复制到剪贴板</button>
+      <button class="btn-secondary" id="export-btn">💾 导出 JSON</button>
+      <button class="btn-warning" id="login-btn">🚀 导入 boss-cli</button>
+    </div>
+  </div>
+  
+  <div class="footer">
+    定时提取 Cookie（包括 __zp_stoken__），自动同步到 boss-cli
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -91,10 +91,10 @@ def save_credential(credential: Credential) -> None:
 
 
 def load_credential() -> Credential | None:
-    """Load credential from saved file with TTL-based auto-refresh.
+    """Load credential from saved file.
 
-    If saved cookies are older than 7 days, automatically attempt to
-    refresh from the browser before falling back to stale cookies.
+    Always reads the latest file content (supports Chrome extension auto-refresh).
+    Clears auth health cache to force re-verification.
     """
     if not CREDENTIAL_FILE.exists():
         return None
@@ -117,21 +117,9 @@ def load_credential() -> Credential | None:
                 return None
             logger.debug("Credential missing __zp_stoken__ (JS-generated), continuing")
 
-        # Check TTL — auto-refresh if stale
-        saved_at = data.get("saved_at", 0)
-        if saved_at and (time.time() - saved_at) > _CREDENTIAL_TTL_SECONDS:
-            logger.info(
-                "Credential older than %d days, attempting browser refresh",
-                CREDENTIAL_TTL_DAYS,
-            )
-            fresh, _ = extract_browser_credential()
-            if fresh:
-                logger.info("Auto-refreshed credential from browser")
-                return fresh
-            logger.warning(
-                "Cookie refresh failed; using existing cookies (age: %d+ days)",
-                CREDENTIAL_TTL_DAYS,
-            )
+        # Clear auth health cache to force re-verification with fresh cookies
+        _AUTH_HEALTH_CACHE.clear()
+
         return cred
     except (json.JSONDecodeError, KeyError) as e:
         logger.warning("Failed to load saved credential: %s", e)
