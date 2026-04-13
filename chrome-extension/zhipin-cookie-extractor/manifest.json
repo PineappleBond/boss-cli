@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Boss直聘 Cookie 提取器",
+  "version": "1.1.0",
+  "description": "实时提取 Boss直聘(zhipin.com) 的所有 Cookie，包括 __zp_stoken__，支持定时自动刷新",
+  "permissions": [
+    "cookies",
+    "activeTab",
+    "clipboardWrite",
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.zhipin.com/*",
+    "*://zhipin.com/*",
+    "http://127.0.0.1:9876/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    },
+    "default_title": "提取 Boss直聘 Cookie"
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  }
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +29,14 @@ class TestCliBasic:
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         assert "BOSS 直聘" in result.output
+
+    def test_version_matches_pyproject(self):
+        from boss_cli import __version__
+
+        with open("/data/disk1/github/boss-cli/pyproject.toml", "rb") as f:
+            pyproject = tomllib.load(f)
+
+        assert __version__ == pyproject["project"]["version"]
 
     def test_all_commands_registered(self):
         result = runner.invoke(cli, ["--help"])
@@ -188,6 +197,27 @@ class TestAuthCommands:
             result = runner.invoke(cli, ["logout"])
             assert result.exit_code == 0
             assert "已退出" in result.output
+
+    def test_login_refreshes_expired_browser_stoken(self):
+        from boss_cli.auth import Credential
+
+        stale_cred = Credential(cookies={"__zp_stoken__": "stale", "wt2": "1", "wbg": "2", "zp_at": "3"})
+        fresh_cred = Credential(cookies={"__zp_stoken__": "fresh", "wt2": "1", "wbg": "2", "zp_at": "3"})
+
+        with patch("boss_cli.auth.extract_browser_credential", return_value=(stale_cred, [])), \
+             patch(
+                 "boss_cli.auth.verify_credential",
+                 side_effect=[
+                     (False, "search: 环境异常 (__zp_stoken__ 已过期)。请重新登录: boss logout && boss login"),
+                     (True, None),
+                 ],
+             ), \
+             patch("boss_cli.browser_login.refresh_browser_credential", return_value=fresh_cred) as refresh_mock:
+            result = runner.invoke(cli, ["login"])
+
+        assert result.exit_code == 0
+        refresh_mock.assert_called_once_with(stale_cred)
+        assert "登录成功" in result.output
 
 
 # ── Personal commands (mocked) ──────────────────────────────────────

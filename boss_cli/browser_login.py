@@ -119,6 +119,24 @@ def _hydrate_stoken_via_browser(cookies: dict[str, str]) -> dict[str, str]:
     return result
 
 
+def refresh_browser_credential(credential: Credential) -> Credential | None:
+    """Refresh a browser-derived credential by letting JS regenerate session cookies.
+
+    This is primarily used when browser cookie extraction succeeds, but the
+    saved ``__zp_stoken__`` has already expired by the time we validate it.
+    """
+    _ensure_camoufox_ready()
+
+    enriched = _hydrate_stoken_via_browser(credential.cookies)
+    merged = {**credential.cookies, **enriched}
+    if merged == credential.cookies:
+        return None
+
+    refreshed = Credential(cookies=merged)
+    save_credential(refreshed)
+    return refreshed
+
+
 def browser_qr_login(
     *,
     on_status: callable | None = None,

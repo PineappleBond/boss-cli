@@ -91,10 +91,10 @@ def save_credential(credential: Credential) -> None:
 
 
 def load_credential() -> Credential | None:
-    """Load credential from saved file with TTL-based auto-refresh.
+    """Load credential from saved file.
 
-    If saved cookies are older than 7 days, automatically attempt to
-    refresh from the browser before falling back to stale cookies.
+    Always reads the latest file content (supports Chrome extension auto-refresh).
+    Clears auth health cache to force re-verification.
     """
     if not CREDENTIAL_FILE.exists():
         return None
@@ -117,21 +117,9 @@ def load_credential() -> Credential | None:
                 return None
             logger.debug("Credential missing __zp_stoken__ (JS-generated), continuing")
 
-        # Check TTL — auto-refresh if stale
-        saved_at = data.get("saved_at", 0)
-        if saved_at and (time.time() - saved_at) > _CREDENTIAL_TTL_SECONDS:
-            logger.info(
-                "Credential older than %d days, attempting browser refresh",
-                CREDENTIAL_TTL_DAYS,
-            )
-            fresh, _ = extract_browser_credential()
-            if fresh:
-                logger.info("Auto-refreshed credential from browser")
-                return fresh
-            logger.warning(
-                "Cookie refresh failed; using existing cookies (age: %d+ days)",
-                CREDENTIAL_TTL_DAYS,
-            )
+        # Clear auth health cache to force re-verification with fresh cookies
+        _AUTH_HEALTH_CACHE.clear()
+
         return cred
     except (json.JSONDecodeError, KeyError) as e:
         logger.warning("Failed to load saved credential: %s", e)
@@ -234,6 +222,12 @@ _CHROMIUM_BASE_DIRS: dict[str, str] = {
     "brave": os.path.join("BraveSoftware", "Brave-Browser"),
 }
 
+_LINUX_CHROMIUM_BASE_DIR_CANDIDATES: dict[str, list[str]] = {
+    "chrome": ["google-chrome", os.path.join("Google", "Chrome")],
+    "edge": ["microsoft-edge"],
+    "brave": [os.path.join("BraveSoftware", "Brave-Browser")],
+}
+
 # Default browser order for extraction
 _DEFAULT_BROWSER_ORDER = ["chrome", "edge", "firefox", "brave"]
 
@@ -256,33 +250,35 @@ def _iter_chrome_cookie_files(browser_name: str) -> list[str]:
         return []
 
     if sys.platform == "darwin":
-        root = os.path.join(os.path.expanduser("~"), "Library", "Application Support", base_dir)
+        roots = [os.path.join(os.path.expanduser("~"), "Library", "Application Support", base_dir)]
     elif sys.platform == "win32":
         if browser_name == "edge":
-            root = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data")
+            roots = [os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data")]
         else:
-            root = os.path.join(os.environ.get("LOCALAPPDATA", ""), base_dir)
+            roots = [os.path.join(os.environ.get("LOCALAPPDATA", ""), base_dir)]
     else:
-        if browser_name == "edge":
-            root = os.path.join(os.path.expanduser("~"), ".config", "microsoft-edge")
-        else:
-            root = os.path.join(os.path.expanduser("~"), ".config", base_dir)
+        roots = [
+            os.path.join(os.path.expanduser("~"), ".config", candidate)
+            for candidate in _LINUX_CHROMIUM_BASE_DIR_CANDIDATES.get(browser_name, [base_dir])
+        ]
 
-    if not os.path.isdir(root):
+    existing_roots = [root for root in roots if os.path.isdir(root)]
+    if not existing_roots:
         return []
 
     paths: list[str] = []
-    default_cookies = os.path.join(root, "Default", "Cookies")
-    if os.path.exists(default_cookies):
-        paths.append(default_cookies)
+    for root in existing_roots:
+        default_cookies = os.path.join(root, "Default", "Cookies")
+        if os.path.exists(default_cookies):
+            paths.append(default_cookies)
 
-    profile_dirs = sorted(glob.glob(os.path.join(root, "Profile *")))
-    for profile_dir in profile_dirs:
-        cookie_file = os.path.join(profile_dir, "Cookies")
-        if os.path.exists(cookie_file):
-            paths.append(cookie_file)
+        profile_dirs = sorted(glob.glob(os.path.join(root, "Profile *")))
+        for profile_dir in profile_dirs:
+            cookie_file = os.path.join(profile_dir, "Cookies")
+            if os.path.exists(cookie_file):
+                paths.append(cookie_file)
 
-    return paths
+    return sorted(set(paths), key=os.path.getmtime, reverse=True)
 
 
 def _extract_cookies_from_jar(jar: Any, source: str = "unknown") -> dict[str, str] | None:
